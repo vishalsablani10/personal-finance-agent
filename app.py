@@ -5,6 +5,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 import plotly.express as px
 from googleapiclient.discovery import build
 from google.oauth2 import service_account
+import os
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -20,22 +21,41 @@ SCOPES = [
     'https://www.googleapis.com/auth/drive'
 ]
 
-# Path to your credentials file
-CREDS_FILE = 'credentials.json'
+# --- NEW: Secret Handling ---
+def get_google_creds_dict():
+    """
+    Check if running in Streamlit Cloud. If so, use Secrets.
+    Otherwise, load the local 'credentials.json' file.
+    """
+    if 'google_creds' in st.secrets:
+        # Running in Streamlit Cloud
+        st.info("Using Streamlit secrets for Google credentials.")
+        return st.secrets["google_creds"]
+    else:
+        # Running locally
+        st.info("Using local 'credentials.json' file.")
+        if not os.path.exists('credentials.json'):
+            st.error("Local 'credentials.json' file not found.")
+            return None
+        return 'credentials.json'
 
-# --- NEW: Use @st.cache_resource to cache the API connections ---
-# This is the correct decorator for connections, clients, and models.
 @st.cache_resource
 def get_gsheet_client():
     """Connect to Google Sheets API and cache the client object."""
+    creds_source = get_google_creds_dict()
+    if creds_source is None:
+        return None
+        
     try:
-        creds = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, SCOPES)
+        if isinstance(creds_source, dict):
+            # Load from Streamlit secrets (dictionary)
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_source, SCOPES)
+        else:
+            # Load from local file (string path)
+            creds = ServiceAccountCredentials.from_json_keyfile_name(creds_source, SCOPES)
+        
         client = gspread.authorize(creds)
         return client
-    except FileNotFoundError:
-        st.error(f"Error: The credentials file '{CREDS_FILE}' was not found.")
-        st.info("Please make sure your Google Cloud service account JSON file is in the same folder as 'app.py' and is named 'credentials.json'.")
-        return None
     except Exception as e:
         st.error(f"An error occurred during Sheets authentication: {e}")
         return None
@@ -43,22 +63,26 @@ def get_gsheet_client():
 @st.cache_resource
 def get_gdoc_service():
     """Connect to Google Docs API and cache the service object."""
+    creds_source = get_google_creds_dict()
+    if creds_source is None:
+        return None
+
     try:
-        doc_creds = service_account.Credentials.from_service_account_file(CREDS_FILE, scopes=SCOPES)
+        if isinstance(creds_source, dict):
+            # Load from Streamlit secrets (dictionary)
+            doc_creds = service_account.Credentials.from_service_account_info(creds_source, scopes=SCOPES)
+        else:
+            # Load from local file (string path)
+            doc_creds = service_account.Credentials.from_service_account_file(creds_source, scopes=SCOPES)
+        
         service = build('docs', 'v1', credentials=doc_creds)
         return service
-    except FileNotFoundError:
-        st.error(f"Error: The credentials file '{CREDS_FILE}' was not found.")
-        return None
     except Exception as e:
         st.error(f"An error occurred during Docs authentication: {e}")
         return None
 
 # --- Data Loading Functions ---
-
-# --- UPDATED: Note the leading underscore: '_doc_service' ---
-# This tells @st.cache_data "cache the output, but ignore this argument".
-@st.cache_data(ttl=600)  # Cache data for 10 minutes
+@st.cache_data(ttl=600)
 def load_rules(_doc_service, document_id):
     """Fetches and displays content from a Google Doc."""
     if not _doc_service:
@@ -81,7 +105,6 @@ def load_rules(_doc_service, document_id):
         st.info("Please ensure the Google Doc ID is correct and you have shared the doc with your service account's email.")
         return None
 
-# --- UPDATED: Note the leading underscore: '_client' ---
 @st.cache_data(ttl=600)
 def load_portfolio(_client, sheet_name):
     """Fetches and processes data from a Google Sheet."""
@@ -93,7 +116,10 @@ def load_portfolio(_client, sheet_name):
         data = sheet.get_all_records()
         df = pd.DataFrame(data)
         
-        # Ensure 'Current_Value' is a number
+        if 'Current_Value' not in df.columns:
+            st.error("Error: 'Current_Value' column not found in 'Portfolio' sheet.")
+            return pd.DataFrame()
+            
         df['Current_Value'] = pd.to_numeric(df['Current_Value'])
         return df
     except Exception as e:
@@ -107,7 +133,6 @@ st.title("📊 Personal Finance Agent Dashboard")
 G_DOC_ID = st.text_input("Enter your Google Doc ID:", "YOUR_GOOGLE_DOC_ID_HERE")
 G_SHEET_NAME = st.text_input("Enter your Google Sheet Name (File Name):", "My Finance Sheet")
 
-# --- UPDATED: Call the new authentication functions ---
 gsheet_client = get_gsheet_client()
 gdoc_service = get_gdoc_service()
 
@@ -117,7 +142,6 @@ if gsheet_client and gdoc_service:
     st.header("📜 My Investment Rules & Principles")
     if G_DOC_ID != "YOUR_GOOGLE_DOC_ID_HERE":
         with st.spinner("Loading rules from Google Doc..."):
-            # We still pass the service, but the cache ignores it
             rules = load_rules(gdoc_service, G_DOC_ID) 
             if rules:
                 st.markdown(rules)
@@ -133,15 +157,12 @@ if gsheet_client and gdoc_service:
     st.header("💰 Current Portfolio Allocation")
     if G_SHEET_NAME != "My Finance Sheet":
         with st.spinner("Loading portfolio from Google Sheet..."):
-            # We still pass the client, but the cache ignores it
             portfolio_df = load_portfolio(gsheet_client, G_SHEET_NAME) 
 
             if not portfolio_df.empty:
-                # Calculate metrics
                 total_value = portfolio_df['Current_Value'].sum()
                 portfolio_df['Percentage'] = (portfolio_df['Current_Value'] / total_value)
 
-                # Display metrics and charts
                 st.subheader(f"Total Portfolio Value: ${total_value:,.2f}")
                 
                 col1, col2 = st.columns(2)
@@ -160,7 +181,6 @@ if gsheet_client and gdoc_service:
 
                 with col2:
                     st.subheader("Allocation by Category")
-                    # Group by category
                     category_df = portfolio_df.groupby('Category')['Current_Value'].sum().reset_index()
                     fig_category = px.pie(
                         category_df,
@@ -182,4 +202,4 @@ if gsheet_client and gdoc_service:
         st.info("Please enter your Google Sheet name above to load your portfolio.")
 
 else:
-    st.error("Authentication failed. Please check your 'credentials.json' file or network connection.")
+    st.error("Authentication failed. Please check your credentials (local file or Streamlit secrets).")
