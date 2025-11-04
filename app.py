@@ -30,7 +30,9 @@ def get_google_creds_dict():
     if 'google_creds' in st.secrets:
         # Running in Streamlit Cloud
         st.info("Using Streamlit secrets for Google credentials.")
-        return st.secrets["google_creds"]
+        # --- THIS IS THE FIX ---
+        # Convert the Streamlit AttrDict to a standard Python dict
+        return dict(st.secrets["google_creds"])
     else:
         # Running locally
         st.info("Using local 'credentials.json' file.")
