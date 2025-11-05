@@ -1,7 +1,7 @@
 import streamlit as st
 import gspread
 import pandas as pd
-from oauth2client.service_account import ServiceAccountCredentials
+# We no longer import 'oauth2client'
 import plotly.express as px
 from googleapiclient.discovery import build
 from google.oauth2 import service_account
@@ -14,46 +14,60 @@ st.set_page_config(
     layout="wide",
 )
 
-# --- Google API Authentication (Unchanged) ---
+# --- Google API Authentication (NEW UNIFIED METHOD) ---
 SCOPES = [
-    'https.www.googleapis.com/auth/spreadsheets',
+    'https://www.googleapis.com/auth/spreadsheets',
     'https.www.googleapis.com/auth/drive'
 ]
 
 @st.cache_resource
-def get_gsheet_client():
-    """Connect to Google Sheets API and cache the client object."""
+def get_google_creds():
+    """
+    Loads Google credentials from Streamlit secrets or local file.
+    Uses only the 'google.oauth2.service_account' library.
+    """
     try:
         if 'google_creds' in st.secrets:
+            # Load from Streamlit secrets
             creds_dict = dict(st.secrets["google_creds"])
-            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPES)
+            creds = service_account.Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
         else:
-            creds = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', SCOPES)
-        client = gspread.authorize(creds)
-        return client
+            # Load from local 'credentials.json' file
+            creds = service_account.Credentials.from_service_account_file('credentials.json', scopes=SCOPES)
+        return creds
     except FileNotFoundError:
         st.error("Local 'credentials.json' file not found.")
         return None
     except Exception as e:
-        st.error(f"An error occurred during Sheets authentication: {e}")
+        st.error(f"An error occurred during authentication: {e}")
+        return None
+
+@st.cache_resource
+def get_gsheet_client():
+    """Connect to Google Sheets API using the unified credentials."""
+    creds = get_google_creds()
+    if creds is None:
+        return None
+    try:
+        # Authorize gspread using the unified credentials
+        client = gspread.authorize(creds)
+        return client
+    except Exception as e:
+        st.error(f"An error occurred connecting to Google Sheets: {e}")
         return None
 
 @st.cache_resource
 def get_gdoc_service():
-    """Connect to Google Docs API and cache the service object."""
-    try:
-        if 'google_creds' in st.secrets:
-            creds_dict = dict(st.secrets["google_creds"])
-            doc_creds = service_account.Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
-        else:
-            doc_creds = service_account.Credentials.from_service_account_file('credentials.json', scopes=SCOPES)
-        service = build('docs', 'v1', credentials=doc_creds)
-        return service
-    except FileNotFoundError:
-        st.error("Local 'credentials.json' file not found.")
+    """Connect to Google Docs API using the unified credentials."""
+    creds = get_google_creds()
+    if creds is None:
         return None
+    try:
+        # Build the Docs service using the unified credentials
+        service = build('docs', 'v1', credentials=creds)
+        return service
     except Exception as e:
-        st.error(f"An error occurred during Docs authentication: {e}")
+        st.error(f"An error occurred connecting to Google Docs: {e}")
         return None
 
 # --- Data Loading Functions (Unchanged) ---
@@ -124,7 +138,7 @@ def load_rules_from_sheet(_client, sheet_name):
 def generate_insights(portfolio_df, rules_df):
     """Compares portfolio to rules and generates insight messages."""
     
-    insight_messages = [] # --- NEW: Store messages for the LLM ---
+    insight_messages = [] 
     
     if portfolio_df.empty or rules_df.empty:
         return # Don't run if data is missing
@@ -167,7 +181,6 @@ def generate_insights(portfolio_df, rules_df):
                     f"(Target: {target_perc}%). This is within your {threshold}% threshold."
                 )
                 st.success(message)
-                # We can also add OK messages if we want the LLM to know
                 insight_messages.append(message) 
                 
         return insight_messages # Return the list of messages
@@ -180,7 +193,6 @@ def generate_insights(portfolio_df, rules_df):
 # --- Main Application ---
 st.title("📊 Personal Finance Agent Dashboard")
 
-# --- UPDATED: Hardcoded values ---
 G_DOC_ID = "1o_ACMebYAXB_i7eox1qX23OYYMrF2mbOFNC7RTa75Fo"
 G_SHEET_NAME = "Investment_Analysis"
 
@@ -197,7 +209,6 @@ if gsheet_client and gdoc_service:
     
     # --- 1. Analyst Insights Section ---
     if not portfolio_df.empty and not rules_df.empty:
-        # This function now also returns the list of messages
         insights = generate_insights(portfolio_df, rules_df)
     else:
         st.warning("Could not generate insights. Check portfolio and rules data in your Google Sheet.")
