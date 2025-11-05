@@ -13,9 +13,14 @@ st.set_page_config(
     layout="wide",
 )
 
-# --- Google API Authentication (NEW ISOLATED METHOD) ---
-SCOPES_SHEETS = ['https://www.googleapis.com/auth/spreadsheets']
-SCOPES_DOCS = ['https://www.googleapis.com/auth/drive'] # Docs API uses Drive scope to read files
+# --- Google API Authentication (ISOLATED METHOD) ---
+
+# --- THIS IS THE FIX: Added 'drive' scope to SCOPES_SHEETS ---
+SCOPES_SHEETS = [
+    'https://www.googleapis.com/auth/spreadsheets',
+    'https://www.googleapis.com/auth/drive'
+]
+SCOPES_DOCS = ['https://www.googleapis.com/auth/drive'] # This was already correct
 
 def get_creds_dict():
     """Helper function to load credentials from secrets or file."""
@@ -36,10 +41,8 @@ def get_gsheet_client():
         
     try:
         if isinstance(creds_source, dict):
-            # Use gspread's native dict method
             creds = gspread.service_account_from_dict(creds_source, scopes=SCOPES_SHEETS)
         else:
-            # Use gspread's native file method
             creds = gspread.service_account(filename=creds_source, scopes=SCOPES_SHEETS)
         return creds
     except Exception as e:
@@ -55,10 +58,8 @@ def get_gdoc_service():
         
     try:
         if isinstance(creds_source, dict):
-            # Use google-auth's native dict method
             doc_creds = service_account.Credentials.from_service_account_info(creds_source, scopes=SCOPES_DOCS)
         else:
-            # Use google-auth's native file method
             doc_creds = service_account.Credentials.from_service_account_file(creds_source, scopes=SCOPES_DOCS)
         
         service = build('docs', 'v1', credentials=doc_creds)
@@ -67,7 +68,7 @@ def get_gdoc_service():
         st.error(f"An error occurred connecting to Google Docs: {e}")
         return None
 
-# --- Data Loading Functions ---
+# --- Data Loading Functions (Unchanged) ---
 @st.cache_data(ttl=600)
 def load_rules_from_doc(_doc_service, document_id):
     """Fetches text content from a Google Doc."""
@@ -173,7 +174,7 @@ def generate_insights(portfolio_df, rules_df):
         st.error(f"An error occurred while generating insights: {e}")
         return []
 
-# --- Main Application ---
+# --- Main Application (Unchanged) ---
 st.title("📊 Personal Finance Agent Dashboard")
 
 G_DOC_ID = "1o_ACMebYAXB_i7eox1qX23OYYMrF2mbOFNC7RTa75Fo"
