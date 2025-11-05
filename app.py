@@ -1,7 +1,6 @@
 import streamlit as st
 import gspread
 import pandas as pd
-# We no longer import 'oauth2client'
 import plotly.express as px
 from googleapiclient.discovery import build
 from google.oauth2 import service_account
@@ -14,63 +13,61 @@ st.set_page_config(
     layout="wide",
 )
 
-# --- Google API Authentication (NEW UNIFIED METHOD) ---
-SCOPES = [
-    'https://www.googleapis.com/auth/spreadsheets',
-    'https.www.googleapis.com/auth/drive'
-]
+# --- Google API Authentication (NEW ISOLATED METHOD) ---
+SCOPES_SHEETS = ['https://www.googleapis.com/auth/spreadsheets']
+SCOPES_DOCS = ['https://www.googleapis.com/auth/drive'] # Docs API uses Drive scope to read files
 
-@st.cache_resource
-def get_google_creds():
-    """
-    Loads Google credentials from Streamlit secrets or local file.
-    Uses only the 'google.oauth2.service_account' library.
-    """
-    try:
-        if 'google_creds' in st.secrets:
-            # Load from Streamlit secrets
-            creds_dict = dict(st.secrets["google_creds"])
-            creds = service_account.Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
-        else:
-            # Load from local 'credentials.json' file
-            creds = service_account.Credentials.from_service_account_file('credentials.json', scopes=SCOPES)
-        return creds
-    except FileNotFoundError:
-        st.error("Local 'credentials.json' file not found.")
-        return None
-    except Exception as e:
-        st.error(f"An error occurred during authentication: {e}")
+def get_creds_dict():
+    """Helper function to load credentials from secrets or file."""
+    if 'google_creds' in st.secrets:
+        return dict(st.secrets["google_creds"])
+    elif os.path.exists('credentials.json'):
+        return 'credentials.json'
+    else:
+        st.error("Could not find credentials in Streamlit secrets or as 'credentials.json' file.")
         return None
 
 @st.cache_resource
 def get_gsheet_client():
-    """Connect to Google Sheets API using the unified credentials."""
-    creds = get_google_creds()
-    if creds is None:
+    """Connect to Google Sheets API."""
+    creds_source = get_creds_dict()
+    if creds_source is None:
         return None
+        
     try:
-        # Authorize gspread using the unified credentials
-        client = gspread.authorize(creds)
-        return client
+        if isinstance(creds_source, dict):
+            # Use gspread's native dict method
+            creds = gspread.service_account_from_dict(creds_source, scopes=SCOPES_SHEETS)
+        else:
+            # Use gspread's native file method
+            creds = gspread.service_account(filename=creds_source, scopes=SCOPES_SHEETS)
+        return creds
     except Exception as e:
         st.error(f"An error occurred connecting to Google Sheets: {e}")
         return None
 
 @st.cache_resource
 def get_gdoc_service():
-    """Connect to Google Docs API using the unified credentials."""
-    creds = get_google_creds()
-    if creds is None:
+    """Connect to Google Docs API."""
+    creds_source = get_creds_dict()
+    if creds_source is None:
         return None
+        
     try:
-        # Build the Docs service using the unified credentials
-        service = build('docs', 'v1', credentials=creds)
+        if isinstance(creds_source, dict):
+            # Use google-auth's native dict method
+            doc_creds = service_account.Credentials.from_service_account_info(creds_source, scopes=SCOPES_DOCS)
+        else:
+            # Use google-auth's native file method
+            doc_creds = service_account.Credentials.from_service_account_file(creds_source, scopes=SCOPES_DOCS)
+        
+        service = build('docs', 'v1', credentials=doc_creds)
         return service
     except Exception as e:
         st.error(f"An error occurred connecting to Google Docs: {e}")
         return None
 
-# --- Data Loading Functions (Unchanged) ---
+# --- Data Loading Functions ---
 @st.cache_data(ttl=600)
 def load_rules_from_doc(_doc_service, document_id):
     """Fetches text content from a Google Doc."""
@@ -136,30 +133,19 @@ def load_rules_from_sheet(_client, sheet_name):
 
 # --- Analyst Function (Unchanged) ---
 def generate_insights(portfolio_df, rules_df):
-    """Compares portfolio to rules and generates insight messages."""
-    
     insight_messages = [] 
-    
     if portfolio_df.empty or rules_df.empty:
-        return # Don't run if data is missing
-        
+        return []
     try:
-        # 1. Calculate current allocations
         category_df = portfolio_df.groupby('Category')['Current_Value'].sum().reset_index()
         total_value = category_df['Current_Value'].sum()
         category_df['Current_Percentage'] = (category_df['Current_Value'] / total_value) * 100
-        
-        # 2. Merge with rules
         merged_df = pd.merge(rules_df, category_df, on='Category', how='left')
-        merged_df['Current_Percentage'] = merged_df['Current_Percentage'].fillna(0) # Handle categories you own 0 of
-        
-        # 3. Calculate drift and check for alerts
+        merged_df['Current_Percentage'] = merged_df['Current_Percentage'].fillna(0)
         merged_df['Drift'] = merged_df['Current_Percentage'] - merged_df['Target_Percentage']
         merged_df['Is_Alert'] = abs(merged_df['Drift']) > merged_df['Rebalance_Threshold']
         
         st.header("🤖 Agent Insights")
-        
-        # 4. Display insights
         for _, row in merged_df.iterrows():
             curr_perc = row['Current_Percentage']
             target_perc = row['Target_Percentage']
@@ -174,7 +160,7 @@ def generate_insights(portfolio_df, rules_df):
                     f"outside your {threshold}% threshold."
                 )
                 st.error(message)
-                insight_messages.append(message) # Add to list for LLM
+                insight_messages.append(message)
             else:
                 message = (
                     f"**OK:** Your **'{row['Category']}'** allocation is **{curr_perc:.1f}%** "
@@ -182,13 +168,10 @@ def generate_insights(portfolio_df, rules_df):
                 )
                 st.success(message)
                 insight_messages.append(message) 
-                
-        return insight_messages # Return the list of messages
-                
+        return insight_messages
     except Exception as e:
         st.error(f"An error occurred while generating insights: {e}")
         return []
-
 
 # --- Main Application ---
 st.title("📊 Personal Finance Agent Dashboard")
@@ -202,20 +185,16 @@ gdoc_service = get_gdoc_service()
 
 if gsheet_client and gdoc_service:
     
-    # --- Load data first ---
     with st.spinner("Loading portfolio and rules from Google Sheet..."):
         portfolio_df = load_portfolio(gsheet_client, G_SHEET_NAME)
         rules_df = load_rules_from_sheet(gsheet_client, G_SHEET_NAME)
     
-    # --- 1. Analyst Insights Section ---
     if not portfolio_df.empty and not rules_df.empty:
         insights = generate_insights(portfolio_df, rules_df)
     else:
         st.warning("Could not generate insights. Check portfolio and rules data in your Google Sheet.")
     
     st.divider()
-
-    # --- 2. Investment Rules (from Google Doc) ---
     st.header("📜 My Investment Principles")
     with st.spinner("Loading principles from Google Doc..."):
         rules_text = load_rules_from_doc(gdoc_service, G_DOC_ID) 
@@ -225,13 +204,10 @@ if gsheet_client and gdoc_service:
             st.warning("Could not load principles. Check Doc ID and sharing permissions.")
     
     st.divider()
-
-    # --- 3. Portfolio Allocation (from Google Sheet) ---
     st.header("💰 Current Portfolio Allocation")
     if not portfolio_df.empty:
         total_value = portfolio_df['Current_Value'].sum()
         portfolio_df['Percentage'] = (portfolio_df['Current_Value'] / total_value)
-
         st.subheader(f"Total Portfolio Value: ${total_value:,.2f}")
         
         col1, col2 = st.columns(2)
@@ -246,7 +222,6 @@ if gsheet_client and gdoc_service:
             )
             fig_asset.update_traces(textposition='inside', textinfo='percent+label')
             st.plotly_chart(fig_asset, use_container_width=True)
-
         with col2:
             st.subheader("Allocation by Category")
             category_df = portfolio_df.groupby('Category')['Current_Value'].sum().reset_index()
@@ -263,9 +238,7 @@ if gsheet_client and gdoc_service:
         st.divider()
         st.subheader("Raw Portfolio Data")
         st.dataframe(portfolio_df)
-    
     else:
         st.info("Could not load portfolio data. Check 'Portfolio' tab in your Google Sheet.")
-
 else:
     st.error("Authentication failed. Please check your credentials (local file or Streamlit secrets).")
