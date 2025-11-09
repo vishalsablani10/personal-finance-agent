@@ -5,7 +5,7 @@ import plotly.express as px
 from googleapiclient.discovery import build
 from google.oauth2 import service_account
 import os
-from groq import Groq  # --- NEW: Import Groq ---
+from groq import Groq
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -62,7 +62,7 @@ def get_gdoc_service():
         st.error(f"An error occurred connecting to Google Docs: {e}")
         return None
 
-# --- NEW: LLM "Communicator" Function ---
+# --- LLM "Communicator" Function ---
 @st.cache_data(ttl=600)
 def get_llm_summary(insights_list):
     """
@@ -71,15 +71,12 @@ def get_llm_summary(insights_list):
     if not insights_list:
         return "No specific insights to summarize today."
         
-    # Check for Groq API key in secrets
     if 'GROQ_API_KEY' not in st.secrets:
         st.error("GROQ_API_KEY not found in Streamlit secrets. Cannot generate summary.")
         return None
         
     try:
         client = Groq(api_key=st.secrets["GROQ_API_KEY"])
-        
-        # Combine insights into a single string for the prompt
         insights_text = "\n".join(insights_list)
         
         system_prompt = (
@@ -98,7 +95,8 @@ def get_llm_summary(insights_list):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            model="llama3-8b-8192", # Fast and capable model
+            # --- THIS IS THE FIX ---
+            model="llama-3.1-8b-instant", # Updated from the old model
             temperature=0.7,
         )
         
@@ -175,7 +173,7 @@ def generate_insights(portfolio_df, rules_df):
         merged_df['Drift'] = merged_df['Current_Percentage'] - merged_df['Target_Percentage']
         merged_df['Is_Alert'] = abs(merged_df['Drift']) > merged_df['Rebalance_Threshold']
         
-        st.header("🤖 Agent Insights (Detailed View)") # Renamed header
+        st.header("🤖 Agent Insights (Detailed View)")
         for _, row in merged_df.iterrows():
             curr_perc = row['Current_Percentage']
             target_perc = row['Target_Percentage']
@@ -189,8 +187,8 @@ def generate_insights(portfolio_df, rules_df):
                     f"(Target: {target_perc}%). This is {abs(drift):.1f}% {status} and "
                     f"outside your {threshold}% threshold."
                 )
-                st.error(f"**{message}**") # Show the message
-                insight_messages.append(message) # Add raw text to list
+                st.error(f"**{message}**")
+                insight_messages.append(message)
             else:
                 message = (
                     f"OK: Your '{row['Category']}' allocation is {curr_perc:.1f}% "
@@ -203,7 +201,7 @@ def generate_insights(portfolio_df, rules_df):
         st.error(f"An error occurred while generating insights: {e}")
         return []
 
-# --- Main Application ---
+# --- Main Application (Unchanged) ---
 st.title("🤖 Personal Finance Agent")
 
 G_DOC_ID = "1o_ACMebYAXB_i7eox1qX23OYYMrF2mbOFNC7RTa75Fo"
@@ -219,14 +217,11 @@ if gsheet_client and gdoc_service:
         portfolio_df = load_portfolio(gsheet_client, G_SHEET_NAME)
         rules_df = load_rules_from_sheet(gsheet_client, G_SHEET_NAME)
     
-    # --- UPDATED: Generate LLM Summary First ---
     if not portfolio_df.empty and not rules_df.empty:
         
-        # 1. Get the raw insight list
         insights_list = generate_insights(portfolio_df, rules_df)
         
-        # 2. Get the LLM summary
-        if insights_list: # Only run if there are insights
+        if insights_list:
             st.header("💡 Agent Summary")
             with st.spinner("Generating AI summary..."):
                 summary = get_llm_summary(insights_list)
@@ -238,7 +233,6 @@ if gsheet_client and gdoc_service:
     
     st.divider()
 
-    # --- 3. Portfolio Allocation (from Google Sheet) ---
     st.header("💰 Current Portfolio Allocation")
     if not portfolio_df.empty:
         total_value = portfolio_df['Current_Value'].sum()
@@ -278,7 +272,6 @@ if gsheet_client and gdoc_service:
         
     st.divider()
     
-    # --- 2. Investment Rules (from Google Doc) ---
     st.header("📜 My Investment Principles")
     with st.spinner("Loading principles from Google Doc..."):
         rules_text = load_rules_from_doc(gdoc_service, G_DOC_ID) 
