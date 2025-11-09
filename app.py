@@ -6,8 +6,8 @@ from googleapiclient.discovery import build
 from google.oauth2 import service_account
 import os
 from groq import Groq
-import yfinance as yf  # <-- NEW IMPORT
-import datetime as dt # <-- NEW IMPORT
+import yfinance as yf  
+import datetime as dt 
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -18,10 +18,10 @@ st.set_page_config(
 
 # --- Google API Authentication (ISOLATED METHOD) ---
 SCOPES_SHEETS = [
-    'https://www.googleapis.com/auth/spreadsheets',
-    'https://www.googleapis.com/auth/drive'
+    'https.www.googleapis.com/auth/spreadsheets',
+    'https.www.googleapis.com/auth/drive'
 ]
-SCOPES_DOCS = ['https://www.googleapis.com/auth/drive']
+SCOPES_DOCS = ['https.www.googleapis.com/auth/drive']
 
 def get_creds_dict():
     """Helper function to load credentials from secrets or file."""
@@ -64,9 +64,9 @@ def get_gdoc_service():
         st.error(f"An error occurred connecting to Google Docs: {e}")
         return None
 
-# --- LLM "Communicator" Function (UPDATED) ---
+# --- LLM "Communicator" Function (Unchanged) ---
 @st.cache_data(ttl=600)
-def get_llm_summary(rebalance_insights, market_insights): # <-- UPDATED ARGS
+def get_llm_summary(rebalance_insights, market_insights):
     """
     Takes lists of portfolio and market insights and gets a human-friendly summary from Groq.
     """
@@ -111,7 +111,7 @@ def get_llm_summary(rebalance_insights, market_insights): # <-- UPDATED ARGS
         st.error(f"Error connecting to Groq API: {e}")
         return None
 
-# --- Data Loading Functions (Watchlist Added) ---
+# --- Data Loading Functions (Unchanged) ---
 @st.cache_data(ttl=600)
 def load_rules_from_doc(_doc_service, document_id):
     if not _doc_service: return None
@@ -164,7 +164,6 @@ def load_rules_from_sheet(_client, sheet_name):
         st.error(f"Error loading 'Rules' tab: {e}")
         return pd.DataFrame()
 
-# --- NEW DATA LOADING FUNCTION ---
 @st.cache_data(ttl=600)
 def load_watchlist(_client, sheet_name):
     if not _client: return pd.DataFrame()
@@ -182,7 +181,7 @@ def load_watchlist(_client, sheet_name):
         st.error(f"Error loading 'Watchlist' tab: {e}")
         return pd.DataFrame()
 
-# --- Analyst Functions (NEW Scout Function Added) ---
+# --- Analyst Functions (MARKET SCOUT FUNCTION UPDATED) ---
 def generate_rebalance_insights(portfolio_df, rules_df):
     """Checks for internal portfolio allocation drift."""
     insight_messages = [] 
@@ -224,7 +223,7 @@ def generate_rebalance_insights(portfolio_df, rules_df):
         st.error(f"An error occurred while generating rebalancing insights: {e}")
         return []
 
-# --- NEW MARKET SCOUT FUNCTION ---
+# --- MARKET SCOUT FUNCTION (FIXED) ---
 @st.cache_data(ttl=600) # Cache this data heavily
 def check_market_dips(watchlist_df):
     """Checks for external market buying opportunities."""
@@ -242,16 +241,28 @@ def check_market_dips(watchlist_df):
             asset_name = row['Asset_Name']
             threshold = row['Dip_Threshold_Percent']
             
-            # Get 1 year of data
-            data = yf.download(ticker_symbol, start=one_year_ago, end=today)
+            # --- START OF FIX ---
+            # Use yf.Ticker() for a single, clean data request
+            ticker_obj = yf.Ticker(ticker_symbol)
+            data = ticker_obj.history(start=one_year_ago, end=today)
+            # --- END OF yf.download() REPLACEMENT ---
             
             if data.empty:
                 st.warning(f"Could not get data for {asset_name} ({ticker_symbol}).")
                 continue
 
+            # Drop NaNs to handle missing data (e.g., market closed)
+            clean_high = data['High'].dropna()
+            clean_close = data['Close'].dropna()
+
+            if clean_high.empty or clean_close.empty:
+                st.warning(f"No valid price data to analyze for {asset_name} ({ticker_symbol}).")
+                continue
+            # --- END OF FIX ---
+
             # Calculate 52-week high and current price
-            high_52_week = data['High'].max()
-            current_price = data['Close'].iloc[-1]
+            high_52_week = clean_high.max()
+            current_price = clean_close.iloc[-1]
             
             # Calculate percentage drop from high
             percent_from_high = ((current_price - high_52_week) / high_52_week) * 100
@@ -277,7 +288,7 @@ def check_market_dips(watchlist_df):
     return insight_messages
 
 
-# --- Main Application (UPDATED) ---
+# --- Main Application (Unchanged) ---
 st.title("🤖 Personal Finance Agent")
 
 G_DOC_ID = "1o_ACMebYAXB_i7eox1qX23OYYMrF2mbOFNC7RTa75Fo"
@@ -292,7 +303,7 @@ if gsheet_client and gdoc_service:
     with st.spinner("Loading all financial data from Google..."):
         portfolio_df = load_portfolio(gsheet_client, G_SHEET_NAME)
         rules_df = load_rules_from_sheet(gsheet_client, G_SHEET_NAME)
-        watchlist_df = load_watchlist(gsheet_client, G_SHEET_NAME) # <-- NEW
+        watchlist_df = load_watchlist(gsheet_client, G_SHEET_NAME) 
     
     # --- Generate Insights (Internal and External) ---
     rebalance_insights = []
@@ -305,7 +316,7 @@ if gsheet_client and gdoc_service:
         
     if not watchlist_df.empty:
         with st.spinner("Scouting market for opportunities..."):
-            market_insights = check_market_dips(watchlist_df) # <-- NEW
+            market_insights = check_market_dips(watchlist_df) 
     else:
         st.warning("Could not generate market insights. Check 'Watchlist' data.")
     
