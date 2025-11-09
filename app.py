@@ -6,6 +6,8 @@ from googleapiclient.discovery import build
 from google.oauth2 import service_account
 import os
 from groq import Groq
+import yfinance as yf  # <-- NEW IMPORT
+import datetime as dt # <-- NEW IMPORT
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -62,14 +64,14 @@ def get_gdoc_service():
         st.error(f"An error occurred connecting to Google Docs: {e}")
         return None
 
-# --- LLM "Communicator" Function ---
+# --- LLM "Communicator" Function (UPDATED) ---
 @st.cache_data(ttl=600)
-def get_llm_summary(insights_list):
+def get_llm_summary(rebalance_insights, market_insights): # <-- UPDATED ARGS
     """
-    Takes a list of insight strings and gets a human-friendly summary from Groq.
+    Takes lists of portfolio and market insights and gets a human-friendly summary from Groq.
     """
-    if not insights_list:
-        return "No specific insights to summarize today."
+    if not rebalance_insights and not market_insights:
+        return "No specific insights to summarize today. All systems normal."
         
     if 'GROQ_API_KEY' not in st.secrets:
         st.error("GROQ_API_KEY not found in Streamlit secrets. Cannot generate summary.")
@@ -77,14 +79,18 @@ def get_llm_summary(insights_list):
         
     try:
         client = Groq(api_key=st.secrets["GROQ_API_KEY"])
-        insights_text = "\n".join(insights_list)
+        
+        # Combine both lists of insights for the LLM
+        insights_text = "Internal Portfolio Alerts:\n" + "\n".join(rebalance_insights)
+        insights_text += "\n\nExternal Market Opportunities:\n" + "\n".join(market_insights)
         
         system_prompt = (
             "You are a concise and clear-spoken personal finance assistant. "
-            "I will give you a list of portfolio alerts. Your job is to summarize them "
-            "in a human-friendly, professional, and actionable way. "
-            "Start with the most important alert (e.g., 'ALERT:') first. "
-            "Be brief (2-3 sentences max). Do not use markdown or bullet points, "
+            "I will give you two lists of alerts: 1) Internal Portfolio Alerts (rebalancing needs) "
+            "and 2) External Market Opportunities (assets on my watchlist that are 'on sale').\n"
+            "Your job is to summarize them in a human-friendly, professional, and actionable way. "
+            "Start with the most important alert (e.g., 'ALERT:' or 'OPPORTUNITY:') first. "
+            "Be brief (3-4 sentences max). Do not use markdown or bullet points, "
             "just write a clean paragraph."
         )
         
@@ -95,8 +101,7 @@ def get_llm_summary(insights_list):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            # --- THIS IS THE FIX ---
-            model="llama-3.1-8b-instant", # Updated from the old model
+            model="llama-3.1-8b-instant",
             temperature=0.7,
         )
         
@@ -106,7 +111,7 @@ def get_llm_summary(insights_list):
         st.error(f"Error connecting to Groq API: {e}")
         return None
 
-# --- Data Loading Functions (Unchanged) ---
+# --- Data Loading Functions (Watchlist Added) ---
 @st.cache_data(ttl=600)
 def load_rules_from_doc(_doc_service, document_id):
     if not _doc_service: return None
@@ -159,12 +164,32 @@ def load_rules_from_sheet(_client, sheet_name):
         st.error(f"Error loading 'Rules' tab: {e}")
         return pd.DataFrame()
 
-# --- Analyst Function (Unchanged) ---
-def generate_insights(portfolio_df, rules_df):
+# --- NEW DATA LOADING FUNCTION ---
+@st.cache_data(ttl=600)
+def load_watchlist(_client, sheet_name):
+    if not _client: return pd.DataFrame()
+    try:
+        sheet = _client.open(sheet_name).worksheet("Watchlist")
+        data = sheet.get_all_records()
+        df = pd.DataFrame(data)
+        required_cols = ['Ticker', 'Asset_Name', 'Dip_Threshold_Percent']
+        if not all(col in df.columns for col in required_cols):
+            st.error(f"Error: 'Watchlist' sheet must have columns: {', '.join(required_cols)}")
+            return pd.DataFrame()
+        df['Dip_Threshold_Percent'] = pd.to_numeric(df['Dip_Threshold_Percent'])
+        return df
+    except Exception as e:
+        st.error(f"Error loading 'Watchlist' tab: {e}")
+        return pd.DataFrame()
+
+# --- Analyst Functions (NEW Scout Function Added) ---
+def generate_rebalance_insights(portfolio_df, rules_df):
+    """Checks for internal portfolio allocation drift."""
     insight_messages = [] 
     if portfolio_df.empty or rules_df.empty:
         return []
     try:
+        st.header("🤖 Agent Insights (Rebalancing)")
         category_df = portfolio_df.groupby('Category')['Current_Value'].sum().reset_index()
         total_value = category_df['Current_Value'].sum()
         category_df['Current_Percentage'] = (category_df['Current_Value'] / total_value) * 100
@@ -173,7 +198,6 @@ def generate_insights(portfolio_df, rules_df):
         merged_df['Drift'] = merged_df['Current_Percentage'] - merged_df['Target_Percentage']
         merged_df['Is_Alert'] = abs(merged_df['Drift']) > merged_df['Rebalance_Threshold']
         
-        st.header("🤖 Agent Insights (Detailed View)")
         for _, row in merged_df.iterrows():
             curr_perc = row['Current_Percentage']
             target_perc = row['Target_Percentage']
@@ -195,13 +219,65 @@ def generate_insights(portfolio_df, rules_df):
                     f"(Target: {target_perc}%). This is within your {threshold}% threshold."
                 )
                 st.success(f"**{message}**")
-                insight_messages.append(message) 
         return insight_messages
     except Exception as e:
-        st.error(f"An error occurred while generating insights: {e}")
+        st.error(f"An error occurred while generating rebalancing insights: {e}")
         return []
 
-# --- Main Application (Unchanged) ---
+# --- NEW MARKET SCOUT FUNCTION ---
+@st.cache_data(ttl=600) # Cache this data heavily
+def check_market_dips(watchlist_df):
+    """Checks for external market buying opportunities."""
+    insight_messages = []
+    if watchlist_df.empty:
+        return []
+    
+    st.header("📈 Market Opportunities (Scout)")
+    today = dt.date.today()
+    one_year_ago = today - dt.timedelta(days=365)
+    
+    for _, row in watchlist_df.iterrows():
+        try:
+            ticker_symbol = row['Ticker']
+            asset_name = row['Asset_Name']
+            threshold = row['Dip_Threshold_Percent']
+            
+            # Get 1 year of data
+            data = yf.download(ticker_symbol, start=one_year_ago, end=today)
+            
+            if data.empty:
+                st.warning(f"Could not get data for {asset_name} ({ticker_symbol}).")
+                continue
+
+            # Calculate 52-week high and current price
+            high_52_week = data['High'].max()
+            current_price = data['Close'].iloc[-1]
+            
+            # Calculate percentage drop from high
+            percent_from_high = ((current_price - high_52_week) / high_52_week) * 100
+            
+            if abs(percent_from_high) > threshold:
+                message = (
+                    f"OPPORTUNITY: {asset_name} ({ticker_symbol}) is {abs(percent_from_high):.1f}% "
+                    f"below its 52-week high (Current: ${current_price:,.2f}, High: ${high_52_week:,.2f}). "
+                    f"This is past your {threshold}% threshold."
+                )
+                st.info(f"**{message}**") # Use info for opportunities
+                insight_messages.append(message)
+            else:
+                message = (
+                    f"OK: {asset_name} ({ticker_symbol}) is {abs(percent_from_high):.1f}% "
+                    f"below its 52-week high. This is within your {threshold}% threshold."
+                )
+                st.success(f"**{message}**") # Use success for "OK"
+                
+        except Exception as e:
+            st.error(f"An error occurred while checking market dip for {row['Asset_Name']}: {e}")
+            
+    return insight_messages
+
+
+# --- Main Application (UPDATED) ---
 st.title("🤖 Personal Finance Agent")
 
 G_DOC_ID = "1o_ACMebYAXB_i7eox1qX23OYYMrF2mbOFNC7RTa75Fo"
@@ -213,23 +289,37 @@ gdoc_service = get_gdoc_service()
 
 if gsheet_client and gdoc_service:
     
-    with st.spinner("Loading portfolio and rules from Google Sheet..."):
+    with st.spinner("Loading all financial data from Google..."):
         portfolio_df = load_portfolio(gsheet_client, G_SHEET_NAME)
         rules_df = load_rules_from_sheet(gsheet_client, G_SHEET_NAME)
+        watchlist_df = load_watchlist(gsheet_client, G_SHEET_NAME) # <-- NEW
+    
+    # --- Generate Insights (Internal and External) ---
+    rebalance_insights = []
+    market_insights = []
     
     if not portfolio_df.empty and not rules_df.empty:
-        
-        insights_list = generate_insights(portfolio_df, rules_df)
-        
-        if insights_list:
-            st.header("💡 Agent Summary")
-            with st.spinner("Generating AI summary..."):
-                summary = get_llm_summary(insights_list)
-                if summary:
-                    st.info(summary)
-        
+        rebalance_insights = generate_rebalance_insights(portfolio_df, rules_df)
     else:
-        st.warning("Could not generate insights. Check portfolio and rules data in your Google Sheet.")
+        st.warning("Could not generate rebalancing insights. Check 'Portfolio' and 'Rules' data.")
+        
+    if not watchlist_df.empty:
+        with st.spinner("Scouting market for opportunities..."):
+            market_insights = check_market_dips(watchlist_df) # <-- NEW
+    else:
+        st.warning("Could not generate market insights. Check 'Watchlist' data.")
+    
+    # --- Generate AI Summary (UPDATED) ---
+    st.divider()
+    st.header("💡 Agent's Combined Summary")
+    if rebalance_insights or market_insights: # Check if either list has content
+        with st.spinner("Generating AI summary for all insights..."):
+            # Pass both lists to the LLM
+            summary = get_llm_summary(rebalance_insights, market_insights) 
+            if summary:
+                st.info(f"**{summary}**")
+    else:
+        st.success("All systems normal. No new alerts or opportunities today.")
     
     st.divider()
 
