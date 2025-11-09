@@ -6,3 +6,4 @@ google-auth
 plotly
 groq
 yfinance
+twilio
