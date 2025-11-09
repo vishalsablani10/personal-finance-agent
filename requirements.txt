@@ -4,3 +4,4 @@ gspread
 google-api-python-client
 google-auth
 plotly
+groq
