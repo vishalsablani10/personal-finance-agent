@@ -43,7 +43,6 @@ SCOPES_SHEETS = [
     'https://www.googleapis.com/auth/drive'
 ]
 
-@st.cache_resource
 def get_gsheet_client():
     """Connect to Google Sheets API."""
     try:
@@ -54,7 +53,6 @@ def get_gsheet_client():
         return None
 
 # --- LLM "Communicator" Function (Unchanged) ---
-@st.cache_data(ttl=600)
 def get_llm_summary(rebalance_insights, market_insights):
     """
     Takes lists of portfolio and market insights and gets a human-friendly summary from Groq.
@@ -96,7 +94,6 @@ def get_llm_summary(rebalance_insights, market_insights):
         return None
 
 # --- Data Loading Functions (Unchanged) ---
-@st.cache_data(ttl=600)
 def load_portfolio(_client, sheet_name):
     if not _client: return pd.DataFrame()
     try:
@@ -109,7 +106,6 @@ def load_portfolio(_client, sheet_name):
         print(f"Error loading 'Portfolio' tab: {e}")
         return pd.DataFrame()
 
-@st.cache_data(ttl=600)
 def load_rules_from_sheet(_client, sheet_name):
     if not _client: return pd.DataFrame()
     try:
@@ -123,7 +119,6 @@ def load_rules_from_sheet(_client, sheet_name):
         print(f"Error loading 'Rules' tab: {e}")
         return pd.DataFrame()
 
-@st.cache_data(ttl=600)
 def load_watchlist(_client, sheet_name):
     if not _client: return pd.DataFrame()
     try:
@@ -171,7 +166,6 @@ def generate_rebalance_insights(portfolio_df, rules_df):
         print(f"An error occurred while generating rebalancing insights: {e}")
         return []
 
-@st.cache_data(ttl=600)
 def check_market_dips(watchlist_df):
     """Checks for external market buying opportunities."""
     insight_messages = []
