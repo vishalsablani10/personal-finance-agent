@@ -1,0 +1,45 @@
+# This is a new file: .github/workflows/daily_briefing.yml
+
+name: Daily Finance Briefing
+
+on:
+  # 1. This runs the job on a schedule
+  # This cron job is set for 2:30 AM UTC, which is 8:00 AM IST
+  schedule:
+    - cron: '30 2 * * *'
+  
+  # 2. This allows you to run it manually from the "Actions" tab
+  workflow_dispatch:
+
+jobs:
+  run-daily-agent:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Check out your repository's code
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # Step 2: Set up a Python environment
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10' # You can change this if needed
+
+      # Step 3: Install all the libraries from your requirements.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Step 4: Run your agent script, injecting all the secrets
+      - name: Run Finance Agent
+        run: python run_agent.py
+        env:
+          # This maps your GitHub Secrets to the script
+          GOOGLE_CREDS_JSON: ${{ secrets.GOOGLE_CREDS_JSON }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_PHONE_NUMBER: ${{ secrets.TWILIO_PHONE_NUMBER }}
+          MY_PHONE_NUMBER: ${{ secrets.MY_PHONE_NUMBER }}
