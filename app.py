@@ -6,8 +6,8 @@ from googleapiclient.discovery import build
 from google.oauth2 import service_account
 import os
 from groq import Groq
-import base64 # <-- NEW
-import json   # <-- NEW
+import base64 
+import json   
 import yfinance as yf
 import datetime as dt
 
@@ -23,28 +23,22 @@ SCOPES_SHEETS = [
     'https://www.googleapis.com/auth/spreadsheets',
     'https://www.googleapis.com/auth/drive'
 ]
-SCOPES_DOCS = ['https.www.googleapis.com/auth/drive']
+SCOPES_DOCS = ['https://www.googleapis.com/auth/drive'] # Scope for Docs/Drive
 
 @st.cache_resource
 def get_creds_dict():
     """
     Helper function to load credentials by decoding Base64 string from secrets.
     """
-    # --- UPDATED LOGIC TO DECODE BASE64 ---
     if 'GOOGLE_BASE64_CREDS' in st.secrets:
         try:
-            # 1. Get the encoded string
             encoded_json = st.secrets['GOOGLE_BASE64_CREDS']
-            # 2. Decode the Base64 string to bytes
             decoded_bytes = base64.b64decode(encoded_json)
-            # 3. Load the bytes as a JSON dictionary
             return json.loads(decoded_bytes)
         except Exception as e:
             st.error(f"Error decoding Google credentials from Base64: {e}")
             return None
-    # --- END UPDATED LOGIC ---
     elif os.path.exists('credentials.json'):
-        # Fallback for local testing (though not used in this project setup)
         return 'credentials.json'
     else:
         st.error("Could not find GOOGLE_BASE64_CREDS in Streamlit secrets.")
@@ -56,10 +50,9 @@ def get_gsheet_client():
     creds_source = get_creds_dict()
     if creds_source is None: return None
     try:
-        # Check if it's the dictionary from the Base64 decode
         if isinstance(creds_source, dict):
             creds = gspread.service_account_from_dict(creds_source, scopes=SCOPES_SHEETS)
-        else: # Fallback for filename (local setup)
+        else:
             creds = gspread.service_account(filename=creds_source, scopes=SCOPES_SHEETS)
         return creds
     except Exception as e:
@@ -73,13 +66,22 @@ def get_gdoc_service():
     if creds_source is None: return None
     try:
         if isinstance(creds_source, dict):
-            doc_creds = service_account.Credentials.from_service_account_info(creds_source, scopes=SCOPES_DOCS)
+            # 1. Build the credentials object without scopes first
+            doc_creds = service_account.Credentials.from_service_account_info(creds_source)
+            
+            # 2. EXPLICITLY scope the credentials for the Docs API (THIS IS THE FIX)
+            scoped_creds = doc_creds.with_scopes(SCOPES_DOCS) 
+            
+            # 3. Build the service with the newly scoped credentials
+            service = build('docs', 'v1', credentials=scoped_creds)
         else:
+            # Fallback for local filename
             doc_creds = service_account.Credentials.from_service_account_file(creds_source, scopes=SCOPES_DOCS)
-        service = build('docs', 'v1', credentials=doc_creds)
+            service = build('docs', 'v1', credentials=doc_creds)
+            
         return service
     except Exception as e:
-        st.error(f"An error occurred connecting to Google Docs: {e}")
+        st.error(f"Error loading Google Doc: {e}")
         return None
 
 # --- LLM "Communicator" Function (Unchanged) ---
