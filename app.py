@@ -6,8 +6,10 @@ from googleapiclient.discovery import build
 from google.oauth2 import service_account
 import os
 from groq import Groq
-import yfinance as yf  
-import datetime as dt 
+import base64 # <-- NEW
+import json   # <-- NEW
+import yfinance as yf
+import datetime as dt
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -18,19 +20,34 @@ st.set_page_config(
 
 # --- Google API Authentication (ISOLATED METHOD) ---
 SCOPES_SHEETS = [
-    'https.www.googleapis.com/auth/spreadsheets',
-    'https.www.googleapis.com/auth/drive'
+    'https://www.googleapis.com/auth/spreadsheets',
+    'https://www.googleapis.com/auth/drive'
 ]
 SCOPES_DOCS = ['https.www.googleapis.com/auth/drive']
 
+@st.cache_resource
 def get_creds_dict():
-    """Helper function to load credentials from secrets or file."""
-    if 'google_creds' in st.secrets:
-        return dict(st.secrets["google_creds"])
+    """
+    Helper function to load credentials by decoding Base64 string from secrets.
+    """
+    # --- UPDATED LOGIC TO DECODE BASE64 ---
+    if 'GOOGLE_BASE64_CREDS' in st.secrets:
+        try:
+            # 1. Get the encoded string
+            encoded_json = st.secrets['GOOGLE_BASE64_CREDS']
+            # 2. Decode the Base64 string to bytes
+            decoded_bytes = base64.b64decode(encoded_json)
+            # 3. Load the bytes as a JSON dictionary
+            return json.loads(decoded_bytes)
+        except Exception as e:
+            st.error(f"Error decoding Google credentials from Base64: {e}")
+            return None
+    # --- END UPDATED LOGIC ---
     elif os.path.exists('credentials.json'):
+        # Fallback for local testing (though not used in this project setup)
         return 'credentials.json'
     else:
-        st.error("Could not find credentials in Streamlit secrets or as 'credentials.json' file.")
+        st.error("Could not find GOOGLE_BASE64_CREDS in Streamlit secrets.")
         return None
 
 @st.cache_resource
@@ -39,9 +56,10 @@ def get_gsheet_client():
     creds_source = get_creds_dict()
     if creds_source is None: return None
     try:
+        # Check if it's the dictionary from the Base64 decode
         if isinstance(creds_source, dict):
             creds = gspread.service_account_from_dict(creds_source, scopes=SCOPES_SHEETS)
-        else:
+        else: # Fallback for filename (local setup)
             creds = gspread.service_account(filename=creds_source, scopes=SCOPES_SHEETS)
         return creds
     except Exception as e:
@@ -181,7 +199,7 @@ def load_watchlist(_client, sheet_name):
         st.error(f"Error loading 'Watchlist' tab: {e}")
         return pd.DataFrame()
 
-# --- Analyst Functions (MARKET SCOUT FUNCTION UPDATED) ---
+# --- Analyst Functions (Unchanged) ---
 def generate_rebalance_insights(portfolio_df, rules_df):
     """Checks for internal portfolio allocation drift."""
     insight_messages = [] 
@@ -223,8 +241,7 @@ def generate_rebalance_insights(portfolio_df, rules_df):
         st.error(f"An error occurred while generating rebalancing insights: {e}")
         return []
 
-# --- MARKET SCOUT FUNCTION (FIXED) ---
-@st.cache_data(ttl=600) # Cache this data heavily
+@st.cache_data(ttl=600)
 def check_market_dips(watchlist_df):
     """Checks for external market buying opportunities."""
     insight_messages = []
@@ -241,30 +258,22 @@ def check_market_dips(watchlist_df):
             asset_name = row['Asset_Name']
             threshold = row['Dip_Threshold_Percent']
             
-            # --- START OF FIX ---
-            # Use yf.Ticker() for a single, clean data request
             ticker_obj = yf.Ticker(ticker_symbol)
             data = ticker_obj.history(start=one_year_ago, end=today)
-            # --- END OF yf.download() REPLACEMENT ---
             
             if data.empty:
                 st.warning(f"Could not get data for {asset_name} ({ticker_symbol}).")
                 continue
 
-            # Drop NaNs to handle missing data (e.g., market closed)
             clean_high = data['High'].dropna()
             clean_close = data['Close'].dropna()
 
             if clean_high.empty or clean_close.empty:
                 st.warning(f"No valid price data to analyze for {asset_name} ({ticker_symbol}).")
                 continue
-            # --- END OF FIX ---
 
-            # Calculate 52-week high and current price
             high_52_week = clean_high.max()
             current_price = clean_close.iloc[-1]
-            
-            # Calculate percentage drop from high
             percent_from_high = ((current_price - high_52_week) / high_52_week) * 100
             
             if abs(percent_from_high) > threshold:
