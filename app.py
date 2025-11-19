@@ -72,9 +72,13 @@ def get_gdoc_service():
     if creds_source is None: return None
     try:
         if isinstance(creds_source, dict):
-            doc_creds = service_account.Credentials.from_service_account_info(creds_source)
-            scoped_creds = doc_creds.with_scopes(SCOPES_DOCS) 
-            service = build('docs', 'v1', credentials=scoped_creds)
+            # FIX: Explicitly pass SCOPES_DOCS during credential creation to ensure token generation
+            doc_creds = service_account.Credentials.from_service_account_info(creds_source, scopes=SCOPES_DOCS)
+            
+            # The .with_scopes is often redundant if passed above, but keeping it simple for maximum compatibility:
+            # scoped_creds = doc_creds.with_scopes(SCOPES_DOCS) 
+            
+            service = build('docs', 'v1', credentials=doc_creds)
         else:
             doc_creds = service_account.Credentials.from_service_account_file(creds_source, scopes=SCOPES_DOCS)
             service = build('docs', 'v1', credentials=doc_creds)
