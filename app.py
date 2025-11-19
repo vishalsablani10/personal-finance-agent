@@ -11,6 +11,10 @@ import json
 import yfinance as yf
 import datetime as dt
 
+# --- Import the new Chat Tab module ---
+from chat_tab import render_chat_tab
+# -------------------------------------
+
 # --- Page Configuration ---
 st.set_page_config(
     page_title="Personal Finance Agent",
@@ -18,18 +22,20 @@ st.set_page_config(
     layout="wide",
 )
 
-# --- Google API Authentication (ISOLATED METHOD) ---
+# --- Global Constants ---
+G_DOC_ID = "1o_ACMebYAXB_i7eox1qX23OYYMrF2mbOFNC7RTa75Fo"
+G_SHEET_NAME = "Investment_Analysis"
 SCOPES_SHEETS = [
     'https://www.googleapis.com/auth/spreadsheets',
     'https://www.googleapis.com/auth/drive'
 ]
-SCOPES_DOCS = ['https://www.googleapis.com/auth/drive'] # Scope for Docs/Drive
+SCOPES_DOCS = ['https.www.googleapis.com/auth/drive'] 
+
+# --- AUTH & UTILITY FUNCTIONS (Unchanged from previous successful version) ---
 
 @st.cache_resource
 def get_creds_dict():
-    """
-    Helper function to load credentials by decoding Base64 string from secrets.
-    """
+    """Helper function to load credentials by decoding Base64 string from secrets."""
     if 'GOOGLE_BASE64_CREDS' in st.secrets:
         try:
             encoded_json = st.secrets['GOOGLE_BASE64_CREDS']
@@ -66,16 +72,10 @@ def get_gdoc_service():
     if creds_source is None: return None
     try:
         if isinstance(creds_source, dict):
-            # 1. Build the credentials object without scopes first
             doc_creds = service_account.Credentials.from_service_account_info(creds_source)
-            
-            # 2. EXPLICITLY scope the credentials for the Docs API (THIS IS THE FIX)
             scoped_creds = doc_creds.with_scopes(SCOPES_DOCS) 
-            
-            # 3. Build the service with the newly scoped credentials
             service = build('docs', 'v1', credentials=scoped_creds)
         else:
-            # Fallback for local filename
             doc_creds = service_account.Credentials.from_service_account_file(creds_source, scopes=SCOPES_DOCS)
             service = build('docs', 'v1', credentials=doc_creds)
             
@@ -84,23 +84,17 @@ def get_gdoc_service():
         st.error(f"Error loading Google Doc: {e}")
         return None
 
-# --- LLM "Communicator" Function (Unchanged) ---
 @st.cache_data(ttl=600)
 def get_llm_summary(rebalance_insights, market_insights):
-    """
-    Takes lists of portfolio and market insights and gets a human-friendly summary from Groq.
-    """
+    # (Existing function used for the dashboard's summary box)
     if not rebalance_insights and not market_insights:
         return "No specific insights to summarize today. All systems normal."
         
     if 'GROQ_API_KEY' not in st.secrets:
-        st.error("GROQ_API_KEY not found in Streamlit secrets. Cannot generate summary.")
-        return None
+        return "GROQ_API_KEY not found in Streamlit secrets. Cannot generate summary."
         
     try:
         client = Groq(api_key=st.secrets["GROQ_API_KEY"])
-        
-        # Combine both lists of insights for the LLM
         insights_text = "Internal Portfolio Alerts:\n" + "\n".join(rebalance_insights)
         insights_text += "\n\nExternal Market Opportunities:\n" + "\n".join(market_insights)
         
@@ -113,7 +107,6 @@ def get_llm_summary(rebalance_insights, market_insights):
             "Be brief (3-4 sentences max). Do not use markdown or bullet points, "
             "just write a clean paragraph."
         )
-        
         user_prompt = f"Here are today's portfolio alerts:\n{insights_text}"
         
         chat_completion = client.chat.completions.create(
@@ -124,14 +117,13 @@ def get_llm_summary(rebalance_insights, market_insights):
             model="llama-3.1-8b-instant",
             temperature=0.7,
         )
-        
         return chat_completion.choices[0].message.content
-        
     except Exception as e:
         st.error(f"Error connecting to Groq API: {e}")
         return None
 
-# --- Data Loading Functions (Unchanged) ---
+# --- DATA LOADING (Unchanged) ---
+
 @st.cache_data(ttl=600)
 def load_rules_from_doc(_doc_service, document_id):
     if not _doc_service: return None
@@ -201,7 +193,7 @@ def load_watchlist(_client, sheet_name):
         st.error(f"Error loading 'Watchlist' tab: {e}")
         return pd.DataFrame()
 
-# --- Analyst Functions (Unchanged) ---
+# --- ANALYST FUNCTIONS (Unchanged) ---
 def generate_rebalance_insights(portfolio_df, rules_df):
     """Checks for internal portfolio allocation drift."""
     insight_messages = [] 
@@ -284,32 +276,25 @@ def check_market_dips(watchlist_df):
                     f"below its 52-week high (Current: ${current_price:,.2f}, High: ${high_52_week:,.2f}). "
                     f"This is past your {threshold}% threshold."
                 )
-                st.info(f"**{message}**") # Use info for opportunities
+                st.info(f"**{message}**") 
                 insight_messages.append(message)
             else:
                 message = (
                     f"OK: {asset_name} ({ticker_symbol}) is {abs(percent_from_high):.1f}% "
                     f"below its 52-week high. This is within your {threshold}% threshold."
                 )
-                st.success(f"**{message}**") # Use success for "OK"
+                st.success(f"**{message}**")
                 
         except Exception as e:
             st.error(f"An error occurred while checking market dip for {row['Asset_Name']}: {e}")
             
     return insight_messages
 
+# --- Dashboard Rendering Function ---
 
-# --- Main Application (Unchanged) ---
-st.title("🤖 Personal Finance Agent")
-
-G_DOC_ID = "1o_ACMebYAXB_i7eox1qX23OYYMrF2mbOFNC7RTa75Fo"
-G_SHEET_NAME = "Investment_Analysis"
-
-# Authenticate
-gsheet_client = get_gsheet_client()
-gdoc_service = get_gdoc_service()
-
-if gsheet_client and gdoc_service:
+def render_dashboard_tab(gsheet_client, gdoc_service):
+    """Contains all the original dashboard content."""
+    st.title("🤖 Personal Finance Agent Dashboard")
     
     with st.spinner("Loading all financial data from Google..."):
         portfolio_df = load_portfolio(gsheet_client, G_SHEET_NAME)
@@ -331,12 +316,11 @@ if gsheet_client and gdoc_service:
     else:
         st.warning("Could not generate market insights. Check 'Watchlist' data.")
     
-    # --- Generate AI Summary (UPDATED) ---
+    # --- Generate AI Summary ---
     st.divider()
     st.header("💡 Agent's Combined Summary")
-    if rebalance_insights or market_insights: # Check if either list has content
+    if rebalance_insights or market_insights:
         with st.spinner("Generating AI summary for all insights..."):
-            # Pass both lists to the LLM
             summary = get_llm_summary(rebalance_insights, market_insights) 
             if summary:
                 st.info(f"**{summary}**")
@@ -392,5 +376,29 @@ if gsheet_client and gdoc_service:
         else:
             st.warning("Could not load principles. Check Doc ID and sharing permissions.")
 
-else:
-    st.error("Authentication failed. Please check your credentials (local file or Streamlit secrets).")
+# --- Main Application Entry Point ---
+
+def main():
+    
+    # Authenticate (Runs once)
+    gsheet_client = get_gsheet_client()
+    gdoc_service = get_gdoc_service()
+
+    st.sidebar.title("Agent Control")
+    st.sidebar.info("The agent runs daily at 9 AM IST to send WhatsApp alerts.")
+    
+    if gsheet_client and gdoc_service:
+        # Create tabs for navigation
+        tab1, tab2 = st.tabs(["📊 Dashboard & Alerts", "💬 Advisor Chat"])
+        
+        with tab1:
+            render_dashboard_tab(gsheet_client, gdoc_service)
+        
+        with tab2:
+            render_chat_tab()
+            
+    else:
+        st.error("Authentication failed. Please check your credentials (GOOGLE_BASE64_CREDS and sharing permissions).")
+
+if __name__ == "__main__":
+    main()
