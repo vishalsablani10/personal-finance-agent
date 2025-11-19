@@ -10,14 +10,12 @@ import os
 from groq import Groq
 import yfinance as yf
 import datetime as dt
-from twilio.rest import Client # <-- NEW
-import sys # <-- NEW
-import json # <-- NEW
+from twilio.rest import Client 
+import sys 
+import json 
+import time # Added for safety (delaying API calls)
 
 # --- Load Secrets from Environment Variables ---
-# We must load all secrets from the environment, as GitHub Actions
-# will inject them this way.
-
 try:
     # Google Credentials
     google_creds_json = os.environ['GOOGLE_CREDS_JSON']
@@ -35,7 +33,7 @@ try:
 except KeyError as e:
     print(f"CRITICAL ERROR: Environment variable {e} not set.")
     print("Please set all required secrets in your GitHub Actions settings.")
-    sys.exit(1) # Exit with an error code
+    sys.exit(1)
 
 # --- Google API Authentication (for backend) ---
 SCOPES_SHEETS = [
@@ -52,26 +50,27 @@ def get_gsheet_client():
         print(f"An error occurred connecting to Google Sheets: {e}")
         return None
 
-# --- LLM "Communicator" Function (Unchanged) ---
-def get_llm_summary(rebalance_insights, market_insights):
+# --- LLM "Communicator" Function (UPDATED for News) ---
+def get_llm_summary(rebalance_insights, market_insights, news_insights):
     """
-    Takes lists of portfolio and market insights and gets a human-friendly summary from Groq.
+    Takes lists of all insights and gets a single human-friendly summary from Groq.
     """
-    if not rebalance_insights and not market_insights:
+    if not rebalance_insights and not market_insights and not news_insights:
         return "No specific insights to summarize today. All systems normal."
         
     try:
-        client = Groq(api_key=groq_api_key) # Use key from env
+        client = Groq(api_key=groq_api_key) 
         
         insights_text = "Internal Portfolio Alerts:\n" + "\n".join(rebalance_insights)
         insights_text += "\n\nExternal Market Opportunities:\n" + "\n".join(market_insights)
+        insights_text += "\n\nRecent News Sentiment:\n" + "\n".join(news_insights)
         
         system_prompt = (
             "You are a concise and clear-spoken personal finance assistant. "
-            "I will give you two lists of alerts: 1) Internal Portfolio Alerts (rebalancing needs) "
-            "and 2) External Market Opportunities (assets on my watchlist that are 'on sale').\n"
-            "Your job is to summarize them in a human-friendly, professional, and actionable way. "
-            "Start with the most important alert (e.g., 'ALERT:' or 'OPPORTUNITY:') first. "
+            "I will give you three lists of alerts: 1) Internal Portfolio Alerts (rebalancing needs), "
+            "2) External Market Opportunities (assets on sale), and 3) Recent News Sentiment. "
+            "Your job is to summarize them in a single, professional, and actionable paragraph. "
+            "Prioritize ALERTs and OPPORTUNITIEs first. Then mention significant news (Positive/Negative). "
             "Be brief. This is for a WhatsApp message. Use newlines for readability. "
             "Sign off with '- Your Finance Agent'."
         )
@@ -93,7 +92,71 @@ def get_llm_summary(rebalance_insights, market_insights):
         print(f"Error connecting to Groq API: {e}")
         return None
 
-# --- Data Loading Functions (Unchanged) ---
+# --- NEW: News Analysis Function ---
+
+def analyze_market_news(watchlist_df, groq_api_key):
+    """
+    Simulates fetching relevant news for each ticker and uses Groq to generate a sentiment insight.
+    """
+    news_insights = []
+    
+    # We will iterate through each watchlist asset and search for recent news.
+    for index, row in watchlist_df.iterrows():
+        ticker = row['Ticker']
+        asset_name = row['Asset_Name']
+        
+        # 1. Simulate Google Search (Using the search tool for live results)
+        # Note: The actual tool call is handled by the Gemini backend, 
+        # so here we format the prompt correctly for Groq to receive the search data.
+        
+        search_query = f"Latest 24 hours news and analyst reports for {asset_name} ({ticker})"
+        
+        # This function definition relies on the LLM performing a grounded search.
+        # We will wrap the Groq call to analyze the search results.
+        
+        try:
+            client = Groq(api_key=groq_api_key)
+            
+            system_prompt = (
+                f"You are a financial news summarizer. A user is asking for sentiment analysis on {asset_name} ({ticker}) "
+                f"based on the latest news articles provided via Google Search results. "
+                f"Your output must be a single, concise sentence in this format: "
+                f"SENTIMENT: [Asset Name] is [Sentiment: POSITIVE/NEGATIVE/NEUTRAL] due to [Specific reason, max 10 words]."
+            )
+
+            # Use the search tool through Groq
+            chat_completion = client.chat.completions.create(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": search_query}
+                ],
+                model="llama-3.1-8b-instant",
+                temperature=0.5,
+                tools=[{"google_search": {}}] # Enable Google Search Grounding
+            )
+            
+            # Extract and clean the sentiment summary
+            sentiment_summary = chat_completion.choices[0].message.content.strip()
+            
+            if sentiment_summary.startswith("SENTIMENT:"):
+                news_insights.append(sentiment_summary)
+            else:
+                news_insights.append(f"NEWS: Could not determine clear sentiment for {asset_name}.")
+
+            print(f"  > News Analysis for {asset_name}: {sentiment_summary}")
+            
+            # Introduce a small delay to avoid hitting API rate limits for rapid consecutive calls
+            time.sleep(1) 
+            
+        except Exception as e:
+            print(f"Error during news sentiment analysis for {asset_name}: {e}")
+            news_insights.append(f"NEWS: Failed to analyze recent news for {asset_name}.")
+            
+    return news_insights
+
+
+# --- DATA LOADING (Unchanged) ---
+# (load_portfolio, load_rules_from_sheet, load_watchlist functions remain the same as in app.py)
 def load_portfolio(_client, sheet_name):
     if not _client: return pd.DataFrame()
     try:
@@ -131,7 +194,8 @@ def load_watchlist(_client, sheet_name):
         print(f"Error loading 'Watchlist' tab: {e}")
         return pd.DataFrame()
 
-# --- Analyst Functions (No st calls) ---
+
+# --- ANALYST FUNCTIONS (Rebalance and Dip Check remain the same) ---
 def generate_rebalance_insights(portfolio_df, rules_df):
     """Checks for internal portfolio allocation drift."""
     insight_messages = [] 
@@ -216,7 +280,8 @@ def check_market_dips(watchlist_df):
             
     return insight_messages
 
-# --- NEW: Twilio Message Function ---
+
+# --- NEW: Twilio Message Function (Unchanged) ---
 def send_whatsapp_message(body):
     """Sends a WhatsApp message using Twilio."""
     try:
@@ -232,7 +297,7 @@ def send_whatsapp_message(body):
         print(f"Error sending Twilio message: {e}")
         return False
 
-# --- Main Execution ---
+# --- Main Execution (UPDATED) ---
 def main():
     print("--- Personal Finance Agent: Daily Run ---")
     
@@ -253,14 +318,16 @@ def main():
     # 3. Generate all insights
     rebalance_insights = generate_rebalance_insights(portfolio_df, rules_df)
     market_insights = check_market_dips(watchlist_df)
+    news_insights = analyze_market_news(watchlist_df, groq_api_key) # <-- NEW CALL
     
     # 4. Generate AI Summary
-    if not rebalance_insights and not market_insights:
+    if not rebalance_insights and not market_insights and not news_insights: # <-- UPDATED CHECK
         print("No new insights today. No message will be sent.")
         return
 
     print("Generating AI summary...")
-    summary = get_llm_summary(rebalance_insights, market_insights)
+    # Pass all three lists
+    summary = get_llm_summary(rebalance_insights, market_insights, news_insights) 
     
     if not summary:
         print("CRITICAL: Failed to generate AI summary. Exiting.")
