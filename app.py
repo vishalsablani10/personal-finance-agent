@@ -72,10 +72,16 @@ def get_gdoc_service():
     if creds_source is None: return None
     try:
         if isinstance(creds_source, dict):
-            # FIXED: Build credentials with scopes directly, removing the problematic refresh call.
-            doc_creds = service_account.Credentials.from_service_account_info(creds_source, scopes=SCOPES_DOCS)
-            service = build('docs', 'v1', credentials=doc_creds)
+            # 1. Create base credentials object from info (no scopes in this call)
+            doc_creds = service_account.Credentials.from_service_account_info(creds_source)
+            
+            # 2. Explicitly scope the credentials after creation (THIS IS THE FIX)
+            scoped_creds = doc_creds.with_scopes(SCOPES_DOCS)
+            
+            # 3. Build the service with the newly scoped credentials
+            service = build('docs', 'v1', credentials=scoped_creds)
         else:
+            # Fallback for local filename
             doc_creds = service_account.Credentials.from_service_account_file(creds_source, scopes=SCOPES_DOCS)
             service = build('docs', 'v1', credentials=doc_creds)
             
@@ -127,7 +133,7 @@ def get_llm_summary(rebalance_insights, market_insights):
 
 @st.cache_data(ttl=600)
 def load_rules_from_doc(_doc_service, document_id):
-    if not _doc_service: return None # FIX: Ensure we only proceed if service is valid
+    if not _doc_service: return None # Ensure we only proceed if service is valid
     try:
         document = _doc_service.documents().get(documentId=document_id).execute()
         content = document.get('body').get('content')
