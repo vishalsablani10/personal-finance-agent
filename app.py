@@ -31,7 +31,7 @@ SCOPES_SHEETS = [
 ]
 SCOPES_DOCS = ['https.www.googleapis.com/auth/drive'] 
 
-# --- AUTH & UTILITY FUNCTIONS (Unchanged from previous successful version) ---
+# --- AUTH & UTILITY FUNCTIONS (Modified get_gdoc_service) ---
 
 @st.cache_resource
 def get_creds_dict():
@@ -72,11 +72,12 @@ def get_gdoc_service():
     if creds_source is None: return None
     try:
         if isinstance(creds_source, dict):
-            # FIX: Explicitly pass SCOPES_DOCS during credential creation to ensure token generation
             doc_creds = service_account.Credentials.from_service_account_info(creds_source, scopes=SCOPES_DOCS)
             
-            # The .with_scopes is often redundant if passed above, but keeping it simple for maximum compatibility:
-            # scoped_creds = doc_creds.with_scopes(SCOPES_DOCS) 
+            # CRITICAL FIX: Force refresh the token to ensure the Docs API client finds it.
+            # This bypasses potential caching issues where the token is missing from the credential object initially.
+            if not doc_creds.token:
+                doc_creds.refresh(None) 
             
             service = build('docs', 'v1', credentials=doc_creds)
         else:
