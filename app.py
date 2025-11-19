@@ -10,10 +10,12 @@ import base64
 import json   
 import yfinance as yf
 import datetime as dt
+import time 
 
-# --- Import the new Chat Tab module ---
+# --- Import the Chat Tab ---
+# Ensure chat_tab.py exists in the same folder
 from chat_tab import render_chat_tab
-# -------------------------------------
+# ---------------------------
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -29,9 +31,9 @@ SCOPES_SHEETS = [
     'https://www.googleapis.com/auth/spreadsheets',
     'https://www.googleapis.com/auth/drive'
 ]
-SCOPES_DOCS = ['https.www.googleapis.com/auth/drive'] 
+SCOPES_DOCS = ['https://www.googleapis.com/auth/drive'] 
 
-# --- AUTH & UTILITY FUNCTIONS (Modified get_gdoc_service) ---
+# --- AUTH & UTILITY FUNCTIONS ---
 
 @st.cache_resource
 def get_creds_dict():
@@ -72,68 +74,64 @@ def get_gdoc_service():
     if creds_source is None: return None
     try:
         if isinstance(creds_source, dict):
-            # 1. Create base credentials object from info (no scopes in this call)
+            # FIXED: Initialize credentials then apply scopes
             doc_creds = service_account.Credentials.from_service_account_info(creds_source)
-            
-            # 2. Explicitly scope the credentials after creation (THIS IS THE FIX)
             scoped_creds = doc_creds.with_scopes(SCOPES_DOCS)
-            
-            # 3. Build the service with the newly scoped credentials
             service = build('docs', 'v1', credentials=scoped_creds)
         else:
-            # Fallback for local filename
             doc_creds = service_account.Credentials.from_service_account_file(creds_source, scopes=SCOPES_DOCS)
             service = build('docs', 'v1', credentials=doc_creds)
             
         return service
     except Exception as e:
-        # Catch the exception and print a clear error, but the function should return None on failure.
         st.error(f"Error loading Google Doc: {e}")
         return None
 
-@st.cache_data(ttl=600)
-def get_llm_summary(rebalance_insights, market_insights):
-    # (Existing function used for the dashboard's summary box)
-    if not rebalance_insights and not market_insights:
-        return "No specific insights to summarize today. All systems normal."
-        
-    if 'GROQ_API_KEY' not in st.secrets:
-        return "GROQ_API_KEY not found in Streamlit secrets. Cannot generate summary."
-        
-    try:
-        client = Groq(api_key=st.secrets["GROQ_API_KEY"])
-        insights_text = "Internal Portfolio Alerts:\n" + "\n".join(rebalance_insights)
-        insights_text += "\n\nExternal Market Opportunities:\n" + "\n".join(market_insights)
-        
-        system_prompt = (
-            "You are a concise and clear-spoken personal finance assistant. "
-            "I will give you two lists of alerts: 1) Internal Portfolio Alerts (rebalancing needs) "
-            "and 2) External Market Opportunities (assets on my watchlist that are 'on sale').\n"
-            "Your job is to summarize them in a human-friendly, professional, and actionable way. "
-            "Start with the most important alert (e.g., 'ALERT:' or 'OPPORTUNITY:') first. "
-            "Be brief (3-4 sentences max). Do not use markdown or bullet points, "
-            "just write a clean paragraph."
-        )
-        user_prompt = f"Here are today's portfolio alerts:\n{insights_text}"
-        
-        chat_completion = client.chat.completions.create(
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            model="llama-3.1-8b-instant",
-            temperature=0.7,
-        )
-        return chat_completion.choices[0].message.content
-    except Exception as e:
-        st.error(f"Error connecting to Groq API: {e}")
-        return None
+# --- DATA LOADING ---
 
-# --- DATA LOADING (Unchanged) ---
+@st.cache_data(ttl=600)
+def load_portfolio(_client, sheet_name):
+    if not _client: return pd.DataFrame()
+    try:
+        sheet = _client.open(sheet_name).worksheet("Portfolio")
+        data = sheet.get_all_records()
+        df = pd.DataFrame(data)
+        df['Current_Value'] = pd.to_numeric(df['Current_Value'])
+        return df
+    except Exception as e:
+        st.error(f"Error loading 'Portfolio' tab: {e}")
+        return pd.DataFrame()
+
+@st.cache_data(ttl=600)
+def load_rules_from_sheet(_client, sheet_name):
+    if not _client: return pd.DataFrame()
+    try:
+        sheet = _client.open(sheet_name).worksheet("Rules")
+        data = sheet.get_all_records()
+        df = pd.DataFrame(data)
+        df['Target_Percentage'] = pd.to_numeric(df['Target_Percentage'])
+        df['Rebalance_Threshold'] = pd.to_numeric(df['Rebalance_Threshold'])
+        return df
+    except Exception as e:
+        st.error(f"Error loading 'Rules' tab: {e}")
+        return pd.DataFrame()
+
+@st.cache_data(ttl=600)
+def load_watchlist(_client, sheet_name):
+    if not _client: return pd.DataFrame()
+    try:
+        sheet = _client.open(sheet_name).worksheet("Watchlist")
+        data = sheet.get_all_records()
+        df = pd.DataFrame(data)
+        df['Dip_Threshold_Percent'] = pd.to_numeric(df['Dip_Threshold_Percent'])
+        return df
+    except Exception as e:
+        st.error(f"Error loading 'Watchlist' tab: {e}")
+        return pd.DataFrame()
 
 @st.cache_data(ttl=600)
 def load_rules_from_doc(_doc_service, document_id):
-    if not _doc_service: return None # Ensure we only proceed if service is valid
+    if not _doc_service: return None 
     try:
         document = _doc_service.documents().get(documentId=document_id).execute()
         content = document.get('body').get('content')
@@ -149,58 +147,119 @@ def load_rules_from_doc(_doc_service, document_id):
         st.error(f"Error loading Google Doc: {e}")
         return None
 
-@st.cache_data(ttl=600)
-def load_portfolio(_client, sheet_name):
-    if not _client: return pd.DataFrame()
-    try:
-        sheet = _client.open(sheet_name).worksheet("Portfolio")
-        data = sheet.get_all_records()
-        df = pd.DataFrame(data)
-        if 'Current_Value' not in df.columns or 'Category' not in df.columns:
-            st.error("Error: 'Portfolio' sheet must have 'Current_Value' and 'Category' columns.")
-            return pd.DataFrame()
-        df['Current_Value'] = pd.to_numeric(df['Current_Value'])
-        return df
-    except Exception as e:
-        st.error(f"Error loading 'Portfolio' tab: {e}")
-        return pd.DataFrame()
+# --- INTELLIGENT ANALYST FUNCTIONS ---
 
 @st.cache_data(ttl=600)
-def load_rules_from_sheet(_client, sheet_name):
-    if not _client: return pd.DataFrame()
+def get_llm_summary(rebalance_insights, market_insights, news_insights):
+    """Generates the main dashboard summary using Groq."""
+    if not rebalance_insights and not market_insights and not news_insights:
+        return "No specific insights to summarize today. All systems normal."
+        
+    if 'GROQ_API_KEY' not in st.secrets:
+        return "GROQ_API_KEY not found in Streamlit secrets. Cannot generate summary."
+        
     try:
-        sheet = _client.open(sheet_name).worksheet("Rules")
-        data = sheet.get_all_records()
-        df = pd.DataFrame(data)
-        required_cols = ['Category', 'Target_Percentage', 'Rebalance_Threshold']
-        if not all(col in df.columns for col in required_cols):
-            st.error(f"Error: 'Rules' sheet must have columns: {', '.join(required_cols)}")
-            return pd.DataFrame()
-        df['Target_Percentage'] = pd.to_numeric(df['Target_Percentage'])
-        df['Rebalance_Threshold'] = pd.to_numeric(df['Rebalance_Threshold'])
-        return df
+        client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+        insights_text = "Internal Portfolio Alerts:\n" + "\n".join(rebalance_insights)
+        insights_text += "\n\nExternal Market Opportunities:\n" + "\n".join(market_insights)
+        insights_text += "\n\nRecent News Sentiment:\n" + "\n".join(news_insights) 
+        
+        system_prompt = (
+            "You are a concise and clear-spoken personal finance assistant. "
+            "I will give you three lists of alerts: 1) Internal Portfolio Alerts, "
+            "2) External Market Opportunities, and 3) Recent News Sentiment. "
+            "Summarize them into a single, professional, actionable paragraph. "
+            "Prioritize Alerts and Opportunities. "
+            "Be brief (3-4 sentences max). Do not use markdown or bullet points."
+        )
+        user_prompt = f"Here are today's alerts:\n{insights_text}"
+        
+        chat_completion = client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            model="llama-3.1-8b-instant",
+            temperature=0.7,
+        )
+        return chat_completion.choices[0].message.content
     except Exception as e:
-        st.error(f"Error loading 'Rules' tab: {e}")
-        return pd.DataFrame()
+        st.error(f"Error connecting to Groq API: {e}")
+        return None
 
 @st.cache_data(ttl=600)
-def load_watchlist(_client, sheet_name):
-    if not _client: return pd.DataFrame()
-    try:
-        sheet = _client.open(sheet_name).worksheet("Watchlist")
-        data = sheet.get_all_records()
-        df = pd.DataFrame(data)
-        required_cols = ['Ticker', 'Asset_Name', 'Dip_Threshold_Percent']
-        if not all(col in df.columns for col in required_cols):
-            st.error(f"Error: 'Watchlist' sheet must have columns: {', '.join(required_cols)}")
-            return pd.DataFrame()
-        df['Dip_Threshold_Percent'] = pd.to_numeric(df['Dip_Threshold_Percent'])
-        return df
-    except Exception as e:
-        st.error(f"Error loading 'Watchlist' tab: {e}")
-        return pd.DataFrame()
+def analyze_market_news(watchlist_df):
+    """
+    Fetches real news via yfinance and uses Groq for sentiment analysis.
+    """
+    news_insights = []
+    st.header("📰 News Sentiment Analysis")
+    
+    if 'GROQ_API_KEY' not in st.secrets:
+        st.error("Cannot run news analysis: GROQ_API_KEY missing.")
+        return []
 
-# --- ANALYST FUNCTIONS (Unchanged) ---
+    client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+    
+    for index, row in watchlist_df.iterrows():
+        ticker_symbol = row['Ticker']
+        asset_name = row['Asset_Name']
+        
+        try:
+            # 1. Get News from yfinance (Free, no new API key needed)
+            ticker_obj = yf.Ticker(ticker_symbol)
+            news_list = ticker_obj.news
+            
+            if not news_list:
+                st.warning(f"No recent news found for {asset_name}.")
+                continue
+                
+            # 2. Prepare Headlines for Groq
+            headlines = [item.get('title', '') for item in news_list[:3]] # Get top 3 headlines
+            headlines_text = "\n".join(headlines)
+            
+            if not headlines_text:
+                continue
+
+            # 3. Analyze Sentiment with Groq
+            system_prompt = (
+                f"Analyze the sentiment for {asset_name} ({ticker_symbol}) based on these headlines. "
+                f"Output a SINGLE sentence in this format: "
+                f"SENTIMENT: [Asset Name] is [POSITIVE/NEGATIVE/NEUTRAL] due to [Brief Reason]."
+            )
+            
+            chat_completion = client.chat.completions.create(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"Headlines:\n{headlines_text}"}
+                ],
+                model="llama-3.1-8b-instant",
+                temperature=0.5,
+            )
+            
+            sentiment_summary = chat_completion.choices[0].message.content.strip()
+            
+            # 4. Display and Store Result
+            if "SENTIMENT:" in sentiment_summary:
+                # Color coding
+                if 'POSITIVE' in sentiment_summary.upper():
+                    st.success(f"**{sentiment_summary}**")
+                elif 'NEGATIVE' in sentiment_summary.upper():
+                    st.error(f"**{sentiment_summary}**")
+                else:
+                    st.info(f"**{sentiment_summary}**")
+                news_insights.append(sentiment_summary)
+            else:
+                st.write(f"**{asset_name}:** {sentiment_summary}")
+                news_insights.append(f"News for {asset_name}: {sentiment_summary}")
+
+            time.sleep(0.5) # Rate limit protection
+            
+        except Exception as e:
+            st.warning(f"Could not analyze news for {asset_name}: {e}")
+            
+    return news_insights
+
 def generate_rebalance_insights(portfolio_df, rules_df):
     """Checks for internal portfolio allocation drift."""
     insight_messages = [] 
@@ -221,25 +280,17 @@ def generate_rebalance_insights(portfolio_df, rules_df):
             target_perc = row['Target_Percentage']
             drift = row['Drift']
             threshold = row['Rebalance_Threshold']
-            
             if row['Is_Alert']:
                 status = "over-allocated" if drift > 0 else "under-allocated"
-                message = (
-                    f"ALERT: Your '{row['Category']}' allocation is {curr_perc:.1f}% "
-                    f"(Target: {target_perc}%). This is {abs(drift):.1f}% {status} and "
-                    f"outside your {threshold}% threshold."
-                )
+                message = f"ALERT: Your '{row['Category']}' is {curr_perc:.1f}% (Target: {target_perc}%). {abs(drift):.1f}% {status}."
                 st.error(f"**{message}**")
                 insight_messages.append(message)
             else:
-                message = (
-                    f"OK: Your '{row['Category']}' allocation is {curr_perc:.1f}% "
-                    f"(Target: {target_perc}%). This is within your {threshold}% threshold."
-                )
+                message = f"OK: '{row['Category']}' is {curr_perc:.1f}% (Within threshold)."
                 st.success(f"**{message}**")
         return insight_messages
     except Exception as e:
-        st.error(f"An error occurred while generating rebalancing insights: {e}")
+        st.error(f"Rebalancing check error: {e}")
         return []
 
 @st.cache_data(ttl=600)
@@ -263,152 +314,109 @@ def check_market_dips(watchlist_df):
             data = ticker_obj.history(start=one_year_ago, end=today)
             
             if data.empty:
-                st.warning(f"Could not get data for {asset_name} ({ticker_symbol}).")
                 continue
 
-            clean_high = data['High'].dropna()
             clean_close = data['Close'].dropna()
-
-            if clean_high.empty or clean_close.empty:
-                st.warning(f"No valid price data to analyze for {asset_name} ({ticker_symbol}).")
+            if clean_close.empty:
                 continue
 
-            high_52_week = clean_high.max()
+            high_52_week = data['High'].max()
             current_price = clean_close.iloc[-1]
             percent_from_high = ((current_price - high_52_week) / high_52_week) * 100
             
             if abs(percent_from_high) > threshold:
-                message = (
-                    f"OPPORTUNITY: {asset_name} ({ticker_symbol}) is {abs(percent_from_high):.1f}% "
-                    f"below its 52-week high (Current: ${current_price:,.2f}, High: ${high_52_week:,.2f}). "
-                    f"This is past your {threshold}% threshold."
-                )
+                message = f"OPPORTUNITY: {asset_name} is {abs(percent_from_high):.1f}% below 52-week high."
                 st.info(f"**{message}**") 
                 insight_messages.append(message)
             else:
-                message = (
-                    f"OK: {asset_name} ({ticker_symbol}) is {abs(percent_from_high):.1f}% "
-                    f"below its 52-week high. This is within your {threshold}% threshold."
-                )
+                message = f"OK: {asset_name} is {abs(percent_from_high):.1f}% below high."
                 st.success(f"**{message}**")
                 
         except Exception as e:
-            st.error(f"An error occurred while checking market dip for {row['Asset_Name']}: {e}")
+            st.error(f"Market Scout error for {row['Asset_Name']}: {e}")
             
     return insight_messages
 
-# --- Dashboard Rendering Function ---
+# --- DASHBOARD RENDERER ---
 
 def render_dashboard_tab(gsheet_client, gdoc_service):
-    """Contains all the original dashboard content."""
     st.title("🤖 Personal Finance Agent Dashboard")
     
-    with st.spinner("Loading all financial data from Google..."):
+    with st.spinner("Loading all financial data..."):
         portfolio_df = load_portfolio(gsheet_client, G_SHEET_NAME)
         rules_df = load_rules_from_sheet(gsheet_client, G_SHEET_NAME)
         watchlist_df = load_watchlist(gsheet_client, G_SHEET_NAME) 
     
-    # --- Generate Insights (Internal and External) ---
     rebalance_insights = []
     market_insights = []
+    news_insights = [] 
     
     if not portfolio_df.empty and not rules_df.empty:
         rebalance_insights = generate_rebalance_insights(portfolio_df, rules_df)
-    else:
-        st.warning("Could not generate rebalancing insights. Check 'Portfolio' and 'Rules' data.")
         
     if not watchlist_df.empty:
         with st.spinner("Scouting market for opportunities..."):
             market_insights = check_market_dips(watchlist_df) 
-    else:
-        st.warning("Could not generate market insights. Check 'Watchlist' data.")
+        
+        # --- NEWS INTEGRATION ---
+        with st.spinner("Analyzing news sentiment (yfinance + Groq)..."):
+            news_insights = analyze_market_news(watchlist_df)
     
-    # --- Generate AI Summary ---
     st.divider()
     st.header("💡 Agent's Combined Summary")
-    if rebalance_insights or market_insights:
-        with st.spinner("Generating AI summary for all insights..."):
-            summary = get_llm_summary(rebalance_insights, market_insights) 
+    if rebalance_insights or market_insights or news_insights: 
+        with st.spinner("Generating AI summary..."):
+            summary = get_llm_summary(rebalance_insights, market_insights, news_insights) 
             if summary:
                 st.info(f"**{summary}**")
     else:
-        st.success("All systems normal. No new alerts or opportunities today.")
+        st.success("All systems normal. No new alerts.")
     
     st.divider()
-
+    
     st.header("💰 Current Portfolio Allocation")
     if not portfolio_df.empty:
         total_value = portfolio_df['Current_Value'].sum()
-        portfolio_df['Percentage'] = (portfolio_df['Current_Value'] / total_value)
         st.subheader(f"Total Portfolio Value: ${total_value:,.2f}")
-        
         col1, col2 = st.columns(2)
         with col1:
-            st.subheader("Allocation by Asset")
-            fig_asset = px.pie(
-                portfolio_df, 
-                names='Asset', 
-                values='Current_Value',
-                title='Allocation by Asset',
-                hole=0.3
-            )
-            fig_asset.update_traces(textposition='inside', textinfo='percent+label')
+            fig_asset = px.pie(portfolio_df, names='Asset', values='Current_Value', title='By Asset', hole=0.3)
             st.plotly_chart(fig_asset, use_container_width=True)
         with col2:
-            st.subheader("Allocation by Category")
             category_df = portfolio_df.groupby('Category')['Current_Value'].sum().reset_index()
-            fig_category = px.pie(
-                category_df,
-                names='Category',
-                values='Current_Value',
-                title='Allocation by Category',
-                hole=0.3
-            )
-            fig_category.update_traces(textposition='inside', textinfo='percent+label')
+            fig_category = px.pie(category_df, names='Category', values='Current_Value', title='By Category', hole=0.3)
             st.plotly_chart(fig_category, use_container_width=True)
-        
-        st.divider()
-        st.subheader("Raw Portfolio Data")
         st.dataframe(portfolio_df)
-    else:
-        st.info("Could not load portfolio data. Check 'Portfolio' tab in your Google Sheet.")
-        
+
     st.divider()
-    
     st.header("📜 My Investment Principles")
-    with st.spinner("Loading principles from Google Doc..."):
+    with st.spinner("Loading principles..."):
         rules_text = load_rules_from_doc(gdoc_service, G_DOC_ID) 
         if rules_text:
             st.markdown(rules_text)
         else:
-            st.warning("Could not load principles. Check Doc ID and sharing permissions.")
+            st.warning("Could not load principles. Check Doc ID and permissions.")
 
-# --- Main Application Entry Point ---
+# --- MAIN ---
 
 def main():
-    
-    # Authenticate (Runs once)
     gsheet_client = get_gsheet_client()
     gdoc_service = get_gdoc_service()
 
     st.sidebar.title("Agent Control")
-    st.sidebar.info("The agent runs daily at 9 AM IST to send WhatsApp alerts.")
+    st.sidebar.info("Runs daily at 9 AM IST.")
     
-    # Crucial check: If BOTH clients are None, show fatal authentication error and exit.
     if gsheet_client is None and gdoc_service is None:
-        st.error("FATAL AUTHENTICATION ERROR: Neither Google Sheets nor Google Docs client could be initialized. Please re-verify your `GOOGLE_BASE64_CREDS` secret.")
+        st.error("FATAL ERROR: Client initialization failed. Check Secrets.")
         return
 
-    # If at least one client works, proceed with the tabs
     tab1, tab2 = st.tabs(["📊 Dashboard & Alerts", "💬 Advisor Chat"])
     
     with tab1:
-        # Pass the clients, allowing individual functions to display specific errors if a service is None
         render_dashboard_tab(gsheet_client, gdoc_service)
     
     with tab2:
         render_chat_tab()
-        
 
 if __name__ == "__main__":
     main()
