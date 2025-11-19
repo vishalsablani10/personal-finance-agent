@@ -72,13 +72,8 @@ def get_gdoc_service():
     if creds_source is None: return None
     try:
         if isinstance(creds_source, dict):
+            # FIXED: Build credentials with scopes directly, removing the problematic refresh call.
             doc_creds = service_account.Credentials.from_service_account_info(creds_source, scopes=SCOPES_DOCS)
-            
-            # CRITICAL FIX: Force refresh the token to ensure the Docs API client finds it.
-            # This bypasses potential caching issues where the token is missing from the credential object initially.
-            if not doc_creds.token:
-                doc_creds.refresh(None) 
-            
             service = build('docs', 'v1', credentials=doc_creds)
         else:
             doc_creds = service_account.Credentials.from_service_account_file(creds_source, scopes=SCOPES_DOCS)
@@ -86,6 +81,7 @@ def get_gdoc_service():
             
         return service
     except Exception as e:
+        # Catch the exception and print a clear error, but the function should return None on failure.
         st.error(f"Error loading Google Doc: {e}")
         return None
 
@@ -131,7 +127,7 @@ def get_llm_summary(rebalance_insights, market_insights):
 
 @st.cache_data(ttl=600)
 def load_rules_from_doc(_doc_service, document_id):
-    if not _doc_service: return None
+    if not _doc_service: return None # FIX: Ensure we only proceed if service is valid
     try:
         document = _doc_service.documents().get(documentId=document_id).execute()
         content = document.get('body').get('content')
@@ -392,18 +388,21 @@ def main():
     st.sidebar.title("Agent Control")
     st.sidebar.info("The agent runs daily at 9 AM IST to send WhatsApp alerts.")
     
-    if gsheet_client and gdoc_service:
-        # Create tabs for navigation
-        tab1, tab2 = st.tabs(["📊 Dashboard & Alerts", "💬 Advisor Chat"])
+    # Crucial check: If BOTH clients are None, show fatal authentication error and exit.
+    if gsheet_client is None and gdoc_service is None:
+        st.error("FATAL AUTHENTICATION ERROR: Neither Google Sheets nor Google Docs client could be initialized. Please re-verify your `GOOGLE_BASE64_CREDS` secret.")
+        return
+
+    # If at least one client works, proceed with the tabs
+    tab1, tab2 = st.tabs(["📊 Dashboard & Alerts", "💬 Advisor Chat"])
+    
+    with tab1:
+        # Pass the clients, allowing individual functions to display specific errors if a service is None
+        render_dashboard_tab(gsheet_client, gdoc_service)
+    
+    with tab2:
+        render_chat_tab()
         
-        with tab1:
-            render_dashboard_tab(gsheet_client, gdoc_service)
-        
-        with tab2:
-            render_chat_tab()
-            
-    else:
-        st.error("Authentication failed. Please check your credentials (GOOGLE_BASE64_CREDS and sharing permissions).")
 
 if __name__ == "__main__":
     main()
