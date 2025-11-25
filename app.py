@@ -13,7 +13,6 @@ import datetime as dt
 import time 
 
 # --- Import the Chat Tab ---
-# Ensure chat_tab.py exists in the same folder
 from chat_tab import render_chat_tab
 # ---------------------------
 
@@ -37,7 +36,6 @@ SCOPES_DOCS = ['https://www.googleapis.com/auth/drive']
 
 @st.cache_resource
 def get_creds_dict():
-    """Helper function to load credentials by decoding Base64 string from secrets."""
     if 'GOOGLE_BASE64_CREDS' in st.secrets:
         try:
             encoded_json = st.secrets['GOOGLE_BASE64_CREDS']
@@ -54,7 +52,6 @@ def get_creds_dict():
 
 @st.cache_resource
 def get_gsheet_client():
-    """Connect to Google Sheets API."""
     creds_source = get_creds_dict()
     if creds_source is None: return None
     try:
@@ -69,37 +66,63 @@ def get_gsheet_client():
 
 @st.cache_resource
 def get_gdoc_service():
-    """Connect to Google Docs API."""
     creds_source = get_creds_dict()
     if creds_source is None: return None
     try:
         if isinstance(creds_source, dict):
-            # FIXED: Initialize credentials then apply scopes
             doc_creds = service_account.Credentials.from_service_account_info(creds_source)
             scoped_creds = doc_creds.with_scopes(SCOPES_DOCS)
             service = build('docs', 'v1', credentials=scoped_creds)
         else:
             doc_creds = service_account.Credentials.from_service_account_file(creds_source, scopes=SCOPES_DOCS)
             service = build('docs', 'v1', credentials=doc_creds)
-            
         return service
     except Exception as e:
         st.error(f"Error loading Google Doc: {e}")
         return None
 
-# --- DATA LOADING ---
+# --- DATA LOADING (UPDATED FOR TRANSACTIONS) ---
 
 @st.cache_data(ttl=600)
 def load_portfolio(_client, sheet_name):
+    """
+    Loads 'Transactions' sheet and groups by Asset/Category to create a Portfolio view.
+    """
     if not _client: return pd.DataFrame()
     try:
-        sheet = _client.open(sheet_name).worksheet("Portfolio")
+        # 1. Load the raw Transactions sheet
+        sheet = _client.open(sheet_name).worksheet("Transactions")
         data = sheet.get_all_records()
-        df = pd.DataFrame(data)
-        df['Current_Value'] = pd.to_numeric(df['Current_Value'])
-        return df
+        raw_df = pd.DataFrame(data)
+        
+        # 2. Check for required columns
+        required_cols = ['Asset', 'Category', 'Invested Value (Rs)']
+        if not all(col in raw_df.columns for col in required_cols):
+            st.error(f"Error: 'Transactions' sheet must have columns: {', '.join(required_cols)}")
+            return pd.DataFrame()
+
+        # 3. Clean numeric columns (remove commas, handle text)
+        # We assume 'Invested Value (Rs)' is the value we want to sum
+        raw_df['Invested Value (Rs)'] = pd.to_numeric(
+            raw_df['Invested Value (Rs)'].astype(str).str.replace(',', ''), errors='coerce'
+        ).fillna(0)
+        
+        if 'No. of units' in raw_df.columns:
+            raw_df['No. of units'] = pd.to_numeric(
+                raw_df['No. of units'].astype(str).str.replace(',', ''), errors='coerce'
+            ).fillna(0)
+
+        # 4. Group by Asset and Category
+        portfolio_df = raw_df.groupby(['Asset', 'Category'])[['Invested Value (Rs)']].sum().reset_index()
+
+        # 5. Rename 'Invested Value (Rs)' to 'Current_Value' for compatibility
+        # Note: We are currently using Invested Value as the proxy for Current Value
+        portfolio_df.rename(columns={'Invested Value (Rs)': 'Current_Value'}, inplace=True)
+
+        return portfolio_df
+        
     except Exception as e:
-        st.error(f"Error loading 'Portfolio' tab: {e}")
+        st.error(f"Error processing 'Transactions' tab: {e}")
         return pd.DataFrame()
 
 @st.cache_data(ttl=600)
@@ -109,6 +132,10 @@ def load_rules_from_sheet(_client, sheet_name):
         sheet = _client.open(sheet_name).worksheet("Rules")
         data = sheet.get_all_records()
         df = pd.DataFrame(data)
+        required_cols = ['Category', 'Target_Percentage', 'Rebalance_Threshold']
+        if not all(col in df.columns for col in required_cols):
+            st.error(f"Error: 'Rules' sheet must have columns: {', '.join(required_cols)}")
+            return pd.DataFrame()
         df['Target_Percentage'] = pd.to_numeric(df['Target_Percentage'])
         df['Rebalance_Threshold'] = pd.to_numeric(df['Rebalance_Threshold'])
         return df
@@ -151,12 +178,11 @@ def load_rules_from_doc(_doc_service, document_id):
 
 @st.cache_data(ttl=600)
 def get_llm_summary(rebalance_insights, market_insights, news_insights):
-    """Generates the main dashboard summary using Groq."""
     if not rebalance_insights and not market_insights and not news_insights:
         return "No specific insights to summarize today. All systems normal."
         
     if 'GROQ_API_KEY' not in st.secrets:
-        return "GROQ_API_KEY not found in Streamlit secrets. Cannot generate summary."
+        return "GROQ_API_KEY not found in Streamlit secrets."
         
     try:
         client = Groq(api_key=st.secrets["GROQ_API_KEY"])
@@ -165,12 +191,9 @@ def get_llm_summary(rebalance_insights, market_insights, news_insights):
         insights_text += "\n\nRecent News Sentiment:\n" + "\n".join(news_insights) 
         
         system_prompt = (
-            "You are a concise and clear-spoken personal finance assistant. "
-            "I will give you three lists of alerts: 1) Internal Portfolio Alerts, "
-            "2) External Market Opportunities, and 3) Recent News Sentiment. "
-            "Summarize them into a single, professional, actionable paragraph. "
-            "Prioritize Alerts and Opportunities. "
-            "Be brief (3-4 sentences max). Do not use markdown or bullet points."
+            "You are a concise personal finance assistant. "
+            "Summarize these alerts: 1) Portfolio Alerts, 2) Market Opportunities, 3) News Sentiment. "
+            "Prioritize Alerts. Be brief (3-4 sentences). No markdown."
         )
         user_prompt = f"Here are today's alerts:\n{insights_text}"
         
@@ -189,14 +212,10 @@ def get_llm_summary(rebalance_insights, market_insights, news_insights):
 
 @st.cache_data(ttl=600)
 def analyze_market_news(watchlist_df):
-    """
-    Fetches real news via yfinance and uses Groq for sentiment analysis.
-    """
     news_insights = []
     st.header("📰 News Sentiment Analysis")
     
     if 'GROQ_API_KEY' not in st.secrets:
-        st.error("Cannot run news analysis: GROQ_API_KEY missing.")
         return []
 
     client = Groq(api_key=st.secrets["GROQ_API_KEY"])
@@ -206,26 +225,18 @@ def analyze_market_news(watchlist_df):
         asset_name = row['Asset_Name']
         
         try:
-            # 1. Get News from yfinance (Free, no new API key needed)
             ticker_obj = yf.Ticker(ticker_symbol)
             news_list = ticker_obj.news
-            
-            if not news_list:
-                st.warning(f"No recent news found for {asset_name}.")
-                continue
+            if not news_list: continue
                 
-            # 2. Prepare Headlines for Groq
-            headlines = [item.get('title', '') for item in news_list[:3]] # Get top 3 headlines
+            headlines = [item.get('title', '') for item in news_list[:3]]
             headlines_text = "\n".join(headlines)
-            
-            if not headlines_text:
-                continue
+            if not headlines_text: continue
 
-            # 3. Analyze Sentiment with Groq
             system_prompt = (
-                f"Analyze the sentiment for {asset_name} ({ticker_symbol}) based on these headlines. "
-                f"Output a SINGLE sentence in this format: "
-                f"SENTIMENT: [Asset Name] is [POSITIVE/NEGATIVE/NEUTRAL] due to [Brief Reason]."
+                f"Analyze sentiment for {asset_name} ({ticker_symbol}). "
+                f"Output SINGLE sentence format: "
+                f"SENTIMENT: [Asset] is [POSITIVE/NEGATIVE/NEUTRAL] due to [Reason]."
             )
             
             chat_completion = client.chat.completions.create(
@@ -239,9 +250,7 @@ def analyze_market_news(watchlist_df):
             
             sentiment_summary = chat_completion.choices[0].message.content.strip()
             
-            # 4. Display and Store Result
             if "SENTIMENT:" in sentiment_summary:
-                # Color coding
                 if 'POSITIVE' in sentiment_summary.upper():
                     st.success(f"**{sentiment_summary}**")
                 elif 'NEGATIVE' in sentiment_summary.upper():
@@ -251,9 +260,9 @@ def analyze_market_news(watchlist_df):
                 news_insights.append(sentiment_summary)
             else:
                 st.write(f"**{asset_name}:** {sentiment_summary}")
-                news_insights.append(f"News for {asset_name}: {sentiment_summary}")
+                news_insights.append(sentiment_summary)
 
-            time.sleep(0.5) # Rate limit protection
+            time.sleep(0.5) 
             
         except Exception as e:
             st.warning(f"Could not analyze news for {asset_name}: {e}")
@@ -295,10 +304,8 @@ def generate_rebalance_insights(portfolio_df, rules_df):
 
 @st.cache_data(ttl=600)
 def check_market_dips(watchlist_df):
-    """Checks for external market buying opportunities."""
     insight_messages = []
-    if watchlist_df.empty:
-        return []
+    if watchlist_df.empty: return []
     
     st.header("📈 Market Opportunities (Scout)")
     today = dt.date.today()
@@ -313,12 +320,9 @@ def check_market_dips(watchlist_df):
             ticker_obj = yf.Ticker(ticker_symbol)
             data = ticker_obj.history(start=one_year_ago, end=today)
             
-            if data.empty:
-                continue
-
+            if data.empty: continue
             clean_close = data['Close'].dropna()
-            if clean_close.empty:
-                continue
+            if clean_close.empty: continue
 
             high_52_week = data['High'].max()
             current_price = clean_close.iloc[-1]
@@ -342,7 +346,7 @@ def check_market_dips(watchlist_df):
 def render_dashboard_tab(gsheet_client, gdoc_service):
     st.title("🤖 Personal Finance Agent Dashboard")
     
-    with st.spinner("Loading all financial data..."):
+    with st.spinner("Loading and aggregating transaction data..."):
         portfolio_df = load_portfolio(gsheet_client, G_SHEET_NAME)
         rules_df = load_rules_from_sheet(gsheet_client, G_SHEET_NAME)
         watchlist_df = load_watchlist(gsheet_client, G_SHEET_NAME) 
@@ -358,8 +362,7 @@ def render_dashboard_tab(gsheet_client, gdoc_service):
         with st.spinner("Scouting market for opportunities..."):
             market_insights = check_market_dips(watchlist_df) 
         
-        # --- NEWS INTEGRATION ---
-        with st.spinner("Analyzing news sentiment (yfinance + Groq)..."):
+        with st.spinner("Analyzing news sentiment..."):
             news_insights = analyze_market_news(watchlist_df)
     
     st.divider()
@@ -374,10 +377,10 @@ def render_dashboard_tab(gsheet_client, gdoc_service):
     
     st.divider()
     
-    st.header("💰 Current Portfolio Allocation")
+    st.header("💰 Current Portfolio Allocation (Based on Invested Value)")
     if not portfolio_df.empty:
         total_value = portfolio_df['Current_Value'].sum()
-        st.subheader(f"Total Portfolio Value: ${total_value:,.2f}")
+        st.subheader(f"Total Invested Value: Rs {total_value:,.2f}")
         col1, col2 = st.columns(2)
         with col1:
             fig_asset = px.pie(portfolio_df, names='Asset', values='Current_Value', title='By Asset', hole=0.3)
@@ -394,8 +397,6 @@ def render_dashboard_tab(gsheet_client, gdoc_service):
         rules_text = load_rules_from_doc(gdoc_service, G_DOC_ID) 
         if rules_text:
             st.markdown(rules_text)
-        else:
-            st.warning("Could not load principles. Check Doc ID and permissions.")
 
 # --- MAIN ---
 
@@ -407,7 +408,7 @@ def main():
     st.sidebar.info("Runs daily at 9 AM IST.")
     
     if gsheet_client is None and gdoc_service is None:
-        st.error("FATAL ERROR: Client initialization failed. Check Secrets.")
+        st.error("FATAL ERROR: Client initialization failed.")
         return
 
     tab1, tab2 = st.tabs(["📊 Dashboard & Alerts", "💬 Advisor Chat"])
