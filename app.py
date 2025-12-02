@@ -341,6 +341,70 @@ def check_market_dips(watchlist_df):
             
     return insight_messages
 
+@st.cache_data(ttl=3600)
+def get_asset_performance(portfolio_df, watchlist_df):
+    """
+    Calculates percentage change for assets over 1D, 1W, 15D, 1M, 3M, 1Y.
+    Uses Watchlist to map Asset Names to Tickers.
+    """
+    performance_data = []
+    
+    # Create a dictionary for fast ticker lookup: Asset Name -> Ticker
+    # Ensure we use the exact Asset Name string for matching
+    asset_to_ticker = dict(zip(watchlist_df['Asset_Name'].astype(str).str.strip(), watchlist_df['Ticker']))
+    
+    unique_assets = portfolio_df['Asset'].unique()
+    
+    for asset in unique_assets:
+        clean_asset = str(asset).strip()
+        ticker = asset_to_ticker.get(clean_asset)
+        
+        row_data = {
+            'Asset': asset,
+            '1D %': 'NA',
+            '1W %': 'NA',
+            '15D %': 'NA',
+            '1M %': 'NA',
+            '3M %': 'NA',
+            '1Y %': 'NA'
+        }
+        
+        if ticker:
+            try:
+                # Fetch 1 year of data
+                t = yf.Ticker(ticker)
+                hist = t.history(period='1y') 
+                
+                if not hist.empty and len(hist) > 1:
+                    current_price = hist['Close'].iloc[-1]
+                    
+                    # Trading day approx offsets
+                    # 1W ~= 5 days, 15D (cal) ~= 10 days, 1M ~= 21 days, 3M ~= 63 days, 1Y ~= 250 days
+                    metrics = {
+                        '1D %': 1,
+                        '1W %': 5,
+                        '15D %': 10,
+                        '1M %': 21,
+                        '3M %': 63,
+                        '1Y %': 250
+                    }
+                    
+                    for label, days_back in metrics.items():
+                        if len(hist) > days_back:
+                            # Use days_back index from the end
+                            # -1 is current, -(days_back + 1) is the past reference
+                            prev_price = hist['Close'].iloc[-(days_back + 1)]
+                            pct_change = ((current_price - prev_price) / prev_price) * 100
+                            row_data[label] = f"{pct_change:+.2f}%"
+                        else:
+                            row_data[label] = "NA"
+            except Exception as e:
+                print(f"Error fetching data for {asset}: {e}")
+                
+        performance_data.append(row_data)
+        
+    return pd.DataFrame(performance_data)
+
 # --- DASHBOARD RENDERER ---
 
 def render_dashboard_tab(gsheet_client, gdoc_service):
@@ -418,6 +482,17 @@ def render_dashboard_tab(gsheet_client, gdoc_service):
         
         # 2. Display without index (hide_index=True)
         st.dataframe(display_df, hide_index=True)
+
+        # --- NEW: Market Performance Table ---
+        if not watchlist_df.empty:
+            st.divider()
+            st.header("🚀 Market Performance Snapshot")
+            st.markdown("Percentage change over key timeframes for assets in your portfolio (linked via Watchlist).")
+            
+            with st.spinner("Calculating market performance metrics..."):
+                perf_df = get_asset_performance(portfolio_df, watchlist_df)
+                if not perf_df.empty:
+                    st.dataframe(perf_df, hide_index=True)
 
     st.divider()
     st.header("📜 My Investment Principles")
