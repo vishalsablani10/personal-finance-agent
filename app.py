@@ -217,7 +217,6 @@ def get_llm_summary(rebalance_insights, market_insights, news_insights):
         st.error(f"Error connecting to Groq API: {e}")
         return None
 
-# --- UPDATED NEWS ANALYST FUNCTION (Uses Ticker Sheet) ---
 @st.cache_data(ttl=600)
 def analyze_market_news(ticker_df):
     news_insights = []
@@ -322,20 +321,29 @@ def generate_rebalance_insights(portfolio_df, rules_df):
         st.error(f"Rebalancing check error: {e}")
         return []
 
+# --- UPDATED MARKET SCOUT FUNCTION (Uses Ticker Sheet) ---
 @st.cache_data(ttl=600)
-def check_market_dips(watchlist_df):
+def check_market_dips(ticker_df):
+    """Checks for external market buying opportunities using Ticker sheet."""
     insight_messages = []
-    if watchlist_df.empty: return []
+    if ticker_df.empty: 
+        st.info("No assets found for market scout.")
+        return []
     
     st.header("📈 Market Opportunities (Scout)")
+    
     today = dt.date.today()
     one_year_ago = today - dt.timedelta(days=365)
     
-    for _, row in watchlist_df.iterrows():
+    # Default threshold since Ticker sheet might not have one
+    DEFAULT_THRESHOLD = 5.0
+    
+    for _, row in ticker_df.iterrows():
         try:
             ticker_symbol = row['Ticker']
-            asset_name = row['Asset_Name']
-            threshold = row['Dip_Threshold_Percent']
+            # Fallback to 'Asset' (Ticker sheet) or 'Asset_Name' (Watchlist compatibility)
+            asset_name = row.get('Asset', row.get('Asset_Name', 'Unknown Asset'))
+            threshold = row.get('Dip_Threshold_Percent', DEFAULT_THRESHOLD)
             
             ticker_obj = yf.Ticker(ticker_symbol)
             data = ticker_obj.history(start=one_year_ago, end=today)
@@ -357,7 +365,7 @@ def check_market_dips(watchlist_df):
                 st.success(f"**{message}**")
                 
         except Exception as e:
-            st.error(f"Market Scout error for {row['Asset_Name']}: {e}")
+            st.error(f"Market Scout error for {row.get('Asset', 'Unknown')}: {e}")
             
     return insight_messages
 
@@ -447,12 +455,11 @@ def render_dashboard_tab(gsheet_client, gdoc_service):
     if not portfolio_df.empty and not rules_df.empty:
         rebalance_insights = generate_rebalance_insights(portfolio_df, rules_df)
         
-    if not watchlist_df.empty:
-        with st.spinner("Scouting market for opportunities..."):
-            market_insights = check_market_dips(watchlist_df) 
-    
-    # --- UPDATED: Pass Ticker Map for Analysis ---
+    # --- UPDATED: Pass Ticker Map for Scout ---
     if not ticker_map_df.empty:
+        with st.spinner("Scouting market for opportunities..."):
+            market_insights = check_market_dips(ticker_map_df) 
+        
         with st.spinner("Analyzing news sentiment..."):
             news_insights = analyze_market_news(ticker_map_df)
     
