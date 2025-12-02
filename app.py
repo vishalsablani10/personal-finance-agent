@@ -147,7 +147,6 @@ def load_watchlist(_client, sheet_name):
         st.error(f"Error loading 'Watchlist' tab: {e}")
         return pd.DataFrame()
 
-# --- NEW: LOAD TICKER MAP ---
 @st.cache_data(ttl=600)
 def load_ticker_map(_client, sheet_name):
     """Loads the explicit Asset -> Ticker mapping from the 'Ticker' sheet."""
@@ -156,13 +155,11 @@ def load_ticker_map(_client, sheet_name):
         sheet = _client.open(sheet_name).worksheet("Ticker")
         data = sheet.get_all_records()
         df = pd.DataFrame(data)
-        # Ensure required columns exist
         if 'Asset' not in df.columns or 'Ticker' not in df.columns:
             st.error("Error: 'Ticker' sheet must have columns 'Asset' and 'Ticker'.")
             return pd.DataFrame()
         return df
     except Exception as e:
-        # It's okay if this fails initially, we just won't show the perf table
         st.warning(f"Could not load 'Ticker' tab. Performance table may be empty. Error: {e}")
         return pd.DataFrame()
 
@@ -351,19 +348,19 @@ def check_market_dips(watchlist_df):
             
     return insight_messages
 
+# --- UPDATED FUNCTION FOR ROBUST PERFORMANCE CALCULATION ---
 @st.cache_data(ttl=3600)
 def get_asset_performance(portfolio_df, ticker_df):
     """
-    Calculates percentage change for assets over 1D, 1W, 15D, 1M, 3M, 1Y.
-    Uses 'Ticker' sheet to map Asset Names to Yahoo Finance Tickers.
+    Calculates percentage change using Date-Based Lookups.
+    This fixes issues with weekends/holidays by finding the price
+    on or immediately before the target date, rather than counting rows.
     """
     performance_data = []
     
     if ticker_df.empty:
         return pd.DataFrame()
 
-    # Create a dictionary for fast ticker lookup: Asset Name -> Ticker
-    # Normalize keys/values to string and strip whitespace for matching
     asset_to_ticker = dict(zip(
         ticker_df['Asset'].astype(str).str.strip(), 
         ticker_df['Ticker'].astype(str).str.strip()
@@ -378,12 +375,8 @@ def get_asset_performance(portfolio_df, ticker_df):
         row_data = {
             'Asset': asset,
             'Ticker': ticker if ticker else "Not Found",
-            '1D %': 'NA',
-            '1W %': 'NA',
-            '15D %': 'NA',
-            '1M %': 'NA',
-            '3M %': 'NA',
-            '1Y %': 'NA'
+            '1D %': 'NA', '1W %': 'NA', '1M %': 'NA', 
+            '3M %': 'NA', '6M %': 'NA', '1Y %': 'NA'
         }
         
         if ticker and ticker.lower() != 'nan' and ticker != '':
@@ -392,25 +385,42 @@ def get_asset_performance(portfolio_df, ticker_df):
                 t = yf.Ticker(ticker)
                 hist = t.history(period='1y') 
                 
+                # Ensure data exists and clean index
                 if not hist.empty and len(hist) > 1:
-                    current_price = hist['Close'].iloc[-1]
+                    hist.index = pd.to_datetime(hist.index).tz_localize(None)
                     
-                    metrics = {
-                        '1D %': 1,
-                        '1W %': 5,
-                        '15D %': 10,
-                        '1M %': 21,
-                        '3M %': 63,
-                        '1Y %': 250
+                    # Current price (last available close)
+                    current_price = hist['Close'].iloc[-1]
+                    current_date = hist.index[-1]
+                    
+                    # --- 1. Calculate 1D Change (Last Close vs Prev Close) ---
+                    prev_close = hist['Close'].iloc[-2]
+                    change_1d = ((current_price - prev_close) / prev_close) * 100
+                    row_data['1D %'] = f"{change_1d:+.2f}%"
+
+                    # --- 2. Calculate Dates for Other Timeframes ---
+                    timeframes = {
+                        '1W %': 7,
+                        '1M %': 30,
+                        '3M %': 90,
+                        '6M %': 180,
+                        '1Y %': 365
                     }
                     
-                    for label, days_back in metrics.items():
-                        if len(hist) > days_back:
-                            prev_price = hist['Close'].iloc[-(days_back + 1)]
-                            pct_change = ((current_price - prev_price) / prev_price) * 100
+                    for label, days_back in timeframes.items():
+                        target_date = current_date - dt.timedelta(days=days_back)
+                        
+                        # Find the last trading day on or before the target date
+                        # This automatically handles weekends and holidays
+                        past_data = hist[hist.index <= target_date]
+                        
+                        if not past_data.empty:
+                            ref_price = past_data['Close'].iloc[-1]
+                            pct_change = ((current_price - ref_price) / ref_price) * 100
                             row_data[label] = f"{pct_change:+.2f}%"
                         else:
-                            row_data[label] = "NA"
+                            row_data[label] = "NA" # Not enough history
+
             except Exception as e:
                 print(f"Error fetching data for {asset}: {e}")
                 
@@ -427,7 +437,7 @@ def render_dashboard_tab(gsheet_client, gdoc_service):
         portfolio_df = load_portfolio(gsheet_client, G_SHEET_NAME)
         rules_df = load_rules_from_sheet(gsheet_client, G_SHEET_NAME)
         watchlist_df = load_watchlist(gsheet_client, G_SHEET_NAME) 
-        ticker_map_df = load_ticker_map(gsheet_client, G_SHEET_NAME) # NEW LOAD
+        ticker_map_df = load_ticker_map(gsheet_client, G_SHEET_NAME) 
     
     rebalance_insights = []
     market_insights = []
@@ -461,16 +471,13 @@ def render_dashboard_tab(gsheet_client, gdoc_service):
         st.subheader(f"Total Invested Value: Rs {total_value:,.2f}")
         col1, col2 = st.columns(2)
         
-        # --- Asset Pie Chart ---
         with col1:
             fig_asset = px.pie(portfolio_df, names='Asset', values='Current_Value', title='By Asset', hole=0.3)
             st.plotly_chart(fig_asset, use_container_width=True)
             
-        # --- Category Pie Chart (Enhanced) ---
         with col2:
             category_df = portfolio_df.groupby('Category')['Current_Value'].sum().reset_index()
             
-            # Merge with Rules to get Target Percentage
             if not rules_df.empty:
                 category_df = pd.merge(category_df, rules_df[['Category', 'Target_Percentage']], on='Category', how='left')
                 category_df['Target_Percentage'] = category_df['Target_Percentage'].fillna(0)
@@ -488,25 +495,21 @@ def render_dashboard_tab(gsheet_client, gdoc_service):
             )
             st.plotly_chart(fig_category, use_container_width=True)
             
-        # --- Enhanced Data Table ---
         display_df = portfolio_df.copy()
         display_df.rename(columns={'Current_Value': 'Invested_Value'}, inplace=True)
         st.dataframe(display_df, hide_index=True)
 
         # --- UPDATED: Market Performance Table ---
-        # Only show if we successfully loaded the ticker map
         if not ticker_map_df.empty:
             st.divider()
             st.header("🚀 Market Performance Snapshot")
             st.markdown("Percentage change calculated using 'Ticker' sheet mapping.")
             
             with st.spinner("Calculating market performance metrics..."):
-                # PASS ticker_map_df INSTEAD OF watchlist_df
                 perf_df = get_asset_performance(portfolio_df, ticker_map_df) 
                 if not perf_df.empty:
                     st.dataframe(perf_df, hide_index=True)
         elif not watchlist_df.empty:
-             # Fallback message if Ticker sheet failed but Watchlist exists
              st.warning("Could not load 'Ticker' sheet. Please ensure it exists to see performance metrics.")
 
     st.divider()
