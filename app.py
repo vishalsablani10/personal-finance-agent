@@ -87,36 +87,27 @@ def get_gdoc_service():
 def load_portfolio(_client, sheet_name):
     """
     Loads 'Transactions' sheet and groups by Asset/Category to create a Portfolio view.
-    Includes cleaning steps to remove empty rows.
     """
     if not _client: return pd.DataFrame()
     try:
-        # 1. Load the raw Transactions sheet
         sheet = _client.open(sheet_name).worksheet("Transactions")
         data = sheet.get_all_records()
         raw_df = pd.DataFrame(data)
         
-        # 2. Check for required columns
         required_cols = ['Asset', 'Category', 'Invested Value (Rs)']
         if not all(col in raw_df.columns for col in required_cols):
             st.error(f"Error: 'Transactions' sheet must have columns: {', '.join(required_cols)}")
             return pd.DataFrame()
 
-        # 3. Clean numeric columns
         raw_df['Invested Value (Rs)'] = pd.to_numeric(
             raw_df['Invested Value (Rs)'].astype(str).str.replace(',', ''), errors='coerce'
         ).fillna(0)
         
-        # --- NEW CLEANING STEP ---
-        # Remove rows where Asset name is empty or Value is 0
+        # Clean: Remove rows where Asset name is empty or Value is 0
         raw_df = raw_df[raw_df['Asset'].astype(str).str.strip() != '']
         raw_df = raw_df[raw_df['Invested Value (Rs)'] > 0]
-        # -------------------------
 
-        # 4. Group by Asset and Category
         portfolio_df = raw_df.groupby(['Asset', 'Category'])[['Invested Value (Rs)']].sum().reset_index()
-
-        # 5. Rename 'Invested Value (Rs)' to 'Current_Value' for internal logic compatibility
         portfolio_df.rename(columns={'Invested Value (Rs)': 'Current_Value'}, inplace=True)
 
         return portfolio_df
@@ -154,6 +145,25 @@ def load_watchlist(_client, sheet_name):
         return df
     except Exception as e:
         st.error(f"Error loading 'Watchlist' tab: {e}")
+        return pd.DataFrame()
+
+# --- NEW: LOAD TICKER MAP ---
+@st.cache_data(ttl=600)
+def load_ticker_map(_client, sheet_name):
+    """Loads the explicit Asset -> Ticker mapping from the 'Ticker' sheet."""
+    if not _client: return pd.DataFrame()
+    try:
+        sheet = _client.open(sheet_name).worksheet("Ticker")
+        data = sheet.get_all_records()
+        df = pd.DataFrame(data)
+        # Ensure required columns exist
+        if 'Asset' not in df.columns or 'Ticker' not in df.columns:
+            st.error("Error: 'Ticker' sheet must have columns 'Asset' and 'Ticker'.")
+            return pd.DataFrame()
+        return df
+    except Exception as e:
+        # It's okay if this fails initially, we just won't show the perf table
+        st.warning(f"Could not load 'Ticker' tab. Performance table may be empty. Error: {e}")
         return pd.DataFrame()
 
 @st.cache_data(ttl=600)
@@ -342,16 +352,22 @@ def check_market_dips(watchlist_df):
     return insight_messages
 
 @st.cache_data(ttl=3600)
-def get_asset_performance(portfolio_df, watchlist_df):
+def get_asset_performance(portfolio_df, ticker_df):
     """
     Calculates percentage change for assets over 1D, 1W, 15D, 1M, 3M, 1Y.
-    Uses Watchlist to map Asset Names to Tickers.
+    Uses 'Ticker' sheet to map Asset Names to Yahoo Finance Tickers.
     """
     performance_data = []
     
+    if ticker_df.empty:
+        return pd.DataFrame()
+
     # Create a dictionary for fast ticker lookup: Asset Name -> Ticker
-    # Ensure we use the exact Asset Name string for matching
-    asset_to_ticker = dict(zip(watchlist_df['Asset_Name'].astype(str).str.strip(), watchlist_df['Ticker']))
+    # Normalize keys/values to string and strip whitespace for matching
+    asset_to_ticker = dict(zip(
+        ticker_df['Asset'].astype(str).str.strip(), 
+        ticker_df['Ticker'].astype(str).str.strip()
+    ))
     
     unique_assets = portfolio_df['Asset'].unique()
     
@@ -361,6 +377,7 @@ def get_asset_performance(portfolio_df, watchlist_df):
         
         row_data = {
             'Asset': asset,
+            'Ticker': ticker if ticker else "Not Found",
             '1D %': 'NA',
             '1W %': 'NA',
             '15D %': 'NA',
@@ -369,7 +386,7 @@ def get_asset_performance(portfolio_df, watchlist_df):
             '1Y %': 'NA'
         }
         
-        if ticker:
+        if ticker and ticker.lower() != 'nan' and ticker != '':
             try:
                 # Fetch 1 year of data
                 t = yf.Ticker(ticker)
@@ -378,8 +395,6 @@ def get_asset_performance(portfolio_df, watchlist_df):
                 if not hist.empty and len(hist) > 1:
                     current_price = hist['Close'].iloc[-1]
                     
-                    # Trading day approx offsets
-                    # 1W ~= 5 days, 15D (cal) ~= 10 days, 1M ~= 21 days, 3M ~= 63 days, 1Y ~= 250 days
                     metrics = {
                         '1D %': 1,
                         '1W %': 5,
@@ -391,8 +406,6 @@ def get_asset_performance(portfolio_df, watchlist_df):
                     
                     for label, days_back in metrics.items():
                         if len(hist) > days_back:
-                            # Use days_back index from the end
-                            # -1 is current, -(days_back + 1) is the past reference
                             prev_price = hist['Close'].iloc[-(days_back + 1)]
                             pct_change = ((current_price - prev_price) / prev_price) * 100
                             row_data[label] = f"{pct_change:+.2f}%"
@@ -414,6 +427,7 @@ def render_dashboard_tab(gsheet_client, gdoc_service):
         portfolio_df = load_portfolio(gsheet_client, G_SHEET_NAME)
         rules_df = load_rules_from_sheet(gsheet_client, G_SHEET_NAME)
         watchlist_df = load_watchlist(gsheet_client, G_SHEET_NAME) 
+        ticker_map_df = load_ticker_map(gsheet_client, G_SHEET_NAME) # NEW LOAD
     
     rebalance_insights = []
     market_insights = []
@@ -467,32 +481,33 @@ def render_dashboard_tab(gsheet_client, gdoc_service):
                 values='Current_Value', 
                 title='By Category', 
                 hole=0.3,
-                hover_data=['Target_Percentage'] # Show target in hover tooltip
+                hover_data=['Target_Percentage'] 
             )
-            # Customize the hover label to be cleaner
             fig_category.update_traces(
                 hovertemplate="<b>%{label}</b><br>Value: %{value}<br>Current: %{percent}<br>Target: %{customdata[0]}%"
             )
             st.plotly_chart(fig_category, use_container_width=True)
             
         # --- Enhanced Data Table ---
-        # 1. Rename column for display
         display_df = portfolio_df.copy()
         display_df.rename(columns={'Current_Value': 'Invested_Value'}, inplace=True)
-        
-        # 2. Display without index (hide_index=True)
         st.dataframe(display_df, hide_index=True)
 
-        # --- NEW: Market Performance Table ---
-        if not watchlist_df.empty:
+        # --- UPDATED: Market Performance Table ---
+        # Only show if we successfully loaded the ticker map
+        if not ticker_map_df.empty:
             st.divider()
             st.header("🚀 Market Performance Snapshot")
-            st.markdown("Percentage change over key timeframes for assets in your portfolio (linked via Watchlist).")
+            st.markdown("Percentage change calculated using 'Ticker' sheet mapping.")
             
             with st.spinner("Calculating market performance metrics..."):
-                perf_df = get_asset_performance(portfolio_df, watchlist_df)
+                # PASS ticker_map_df INSTEAD OF watchlist_df
+                perf_df = get_asset_performance(portfolio_df, ticker_map_df) 
                 if not perf_df.empty:
                     st.dataframe(perf_df, hide_index=True)
+        elif not watchlist_df.empty:
+             # Fallback message if Ticker sheet failed but Watchlist exists
+             st.warning("Could not load 'Ticker' sheet. Please ensure it exists to see performance metrics.")
 
     st.divider()
     st.header("📜 My Investment Principles")
