@@ -81,12 +81,13 @@ def get_gdoc_service():
         st.error(f"Error loading Google Doc: {e}")
         return None
 
-# --- DATA LOADING (UPDATED FOR TRANSACTIONS) ---
+# --- DATA LOADING ---
 
 @st.cache_data(ttl=600)
 def load_portfolio(_client, sheet_name):
     """
     Loads 'Transactions' sheet and groups by Asset/Category to create a Portfolio view.
+    Includes cleaning steps to remove empty rows.
     """
     if not _client: return pd.DataFrame()
     try:
@@ -101,22 +102,21 @@ def load_portfolio(_client, sheet_name):
             st.error(f"Error: 'Transactions' sheet must have columns: {', '.join(required_cols)}")
             return pd.DataFrame()
 
-        # 3. Clean numeric columns (remove commas, handle text)
-        # We assume 'Invested Value (Rs)' is the value we want to sum
+        # 3. Clean numeric columns
         raw_df['Invested Value (Rs)'] = pd.to_numeric(
             raw_df['Invested Value (Rs)'].astype(str).str.replace(',', ''), errors='coerce'
         ).fillna(0)
         
-        if 'No. of units' in raw_df.columns:
-            raw_df['No. of units'] = pd.to_numeric(
-                raw_df['No. of units'].astype(str).str.replace(',', ''), errors='coerce'
-            ).fillna(0)
+        # --- NEW CLEANING STEP ---
+        # Remove rows where Asset name is empty or Value is 0
+        raw_df = raw_df[raw_df['Asset'].astype(str).str.strip() != '']
+        raw_df = raw_df[raw_df['Invested Value (Rs)'] > 0]
+        # -------------------------
 
         # 4. Group by Asset and Category
         portfolio_df = raw_df.groupby(['Asset', 'Category'])[['Invested Value (Rs)']].sum().reset_index()
 
-        # 5. Rename 'Invested Value (Rs)' to 'Current_Value' for compatibility
-        # Note: We are currently using Invested Value as the proxy for Current Value
+        # 5. Rename 'Invested Value (Rs)' to 'Current_Value' for internal logic compatibility
         portfolio_df.rename(columns={'Invested Value (Rs)': 'Current_Value'}, inplace=True)
 
         return portfolio_df
@@ -382,14 +382,42 @@ def render_dashboard_tab(gsheet_client, gdoc_service):
         total_value = portfolio_df['Current_Value'].sum()
         st.subheader(f"Total Invested Value: Rs {total_value:,.2f}")
         col1, col2 = st.columns(2)
+        
+        # --- Asset Pie Chart ---
         with col1:
             fig_asset = px.pie(portfolio_df, names='Asset', values='Current_Value', title='By Asset', hole=0.3)
             st.plotly_chart(fig_asset, use_container_width=True)
+            
+        # --- Category Pie Chart (Enhanced) ---
         with col2:
             category_df = portfolio_df.groupby('Category')['Current_Value'].sum().reset_index()
-            fig_category = px.pie(category_df, names='Category', values='Current_Value', title='By Category', hole=0.3)
+            
+            # Merge with Rules to get Target Percentage
+            if not rules_df.empty:
+                category_df = pd.merge(category_df, rules_df[['Category', 'Target_Percentage']], on='Category', how='left')
+                category_df['Target_Percentage'] = category_df['Target_Percentage'].fillna(0)
+            
+            fig_category = px.pie(
+                category_df, 
+                names='Category', 
+                values='Current_Value', 
+                title='By Category', 
+                hole=0.3,
+                hover_data=['Target_Percentage'] # Show target in hover tooltip
+            )
+            # Customize the hover label to be cleaner
+            fig_category.update_traces(
+                hovertemplate="<b>%{label}</b><br>Value: %{value}<br>Current: %{percent}<br>Target: %{customdata[0]}%"
+            )
             st.plotly_chart(fig_category, use_container_width=True)
-        st.dataframe(portfolio_df)
+            
+        # --- Enhanced Data Table ---
+        # 1. Rename column for display
+        display_df = portfolio_df.copy()
+        display_df.rename(columns={'Current_Value': 'Invested_Value'}, inplace=True)
+        
+        # 2. Display without index (hide_index=True)
+        st.dataframe(display_df, hide_index=True)
 
     st.divider()
     st.header("📜 My Investment Principles")
